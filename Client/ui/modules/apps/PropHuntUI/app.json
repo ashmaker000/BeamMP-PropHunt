@@ -1,0 +1,13 @@
+{
+  "name": "Prop Hunt Controller",
+  "version": "1.0",
+  "domElement": "<prop-hunt-ui></prop-hunt-ui>",
+  "css": {},
+  "description": "Controls for Prop Hunt Mod",
+  "author": "COSMOSDRIVES",
+  "types": [
+    "ui.apps",
+    "ui.apps.categories.gameplay"
+  ],
+  "directive": "propHuntUi"
+}

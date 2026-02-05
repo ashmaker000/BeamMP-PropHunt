@@ -1,0 +1,16 @@
+{
+  "bindings": [
+    {
+      "control": "r",
+      "action": "phSetRunner"
+    },
+    {
+      "control": "t",
+      "action": "phTaunt"
+    },
+    {
+      "control": "k",
+      "action": "phScan"
+    }
+  ]
+}

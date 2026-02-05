@@ -1,0 +1,48 @@
+angular.module('beamng.apps')
+  .directive('propHuntUi', [function () {
+    return {
+      templateUrl: '/ui/modules/apps/PropHuntUI/app.html',
+      replace: true,
+      restrict: 'EA',
+      link: function (scope, element, attrs) {
+        scope.data = {
+          isHidden: false,
+          timer: 0,
+          statusText: "WAITING..."
+        };
+
+        scope.setRunner = function () {
+          bngApi.engineLua('extensions.PropHunt.setRunner()');
+        };
+
+        scope.setProp = function () {
+          bngApi.engineLua('extensions.PropHunt.setProp()');
+        };
+
+        scope.swap = function () {
+          bngApi.engineLua('extensions.PropHunt.performSwap()');
+        };
+
+        scope.taunt = function () {
+          bngApi.engineLua('if extensions.PropHunt then extensions.PropHunt.manualTaunt() end');
+        };
+
+        scope.$on('PropHuntUpdate', function (event, data) {
+          scope.$applyAsync(function () {
+            scope.data = data;
+            if (data.gameActive) {
+              if (data.hidePhase) {
+                if (data.playerTeam === 'seeker') scope.data.statusText = 'SEEKER (FROZEN)';
+                else scope.data.statusText = 'HIDER (HIDE NOW)';
+              } else {
+                if (data.playerTeam === 'seeker') scope.data.statusText = 'SEEKER';
+                else scope.data.statusText = 'HIDER (PROP)';
+              }
+            } else {
+              scope.data.statusText = data.isHidden ? 'HIDDEN (PROP)' : 'WAITING...';
+            }
+          });
+        });
+      }
+    };
+  }]);

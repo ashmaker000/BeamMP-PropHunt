@@ -1,0 +1,63 @@
+<div>
+    <!-- FULLSCREEN FLASH (seekers) -->
+    <div ng-if="data.flashActive"
+         style="position:fixed; left:0; top:0; width:100vw; height:100vh; z-index:1000000;
+                background:rgba(255,255,255,{{data.flashAlpha}}); pointer-events:none;"></div>
+
+    <!-- FULLSCREEN SEEKER BLINDFOLD (hide phase) -->
+    <div ng-if="data.gameActive && data.hidePhase && data.playerTeam === 'seeker'"
+         style="position:fixed; left:0; top:0; width:100vw; height:100vh; z-index:999999;
+                background:rgba(0,0,0,0.97); color:white; display:flex; align-items:center; justify-content:center;
+                font-family:'Roboto', sans-serif; text-align:center;">
+        <div>
+            <div style="font-size:48px; font-weight:bold; letter-spacing:2px;">HIDERS HIDING</div>
+            <div style="margin-top:12px; font-size:26px; opacity:0.9;">{{ data.hideTimer | number:0 }}s</div>
+        </div>
+    </div>
+
+    <div style="width:100%; height:100%; background:rgba(0, 0, 0, 0.8); color:white; padding:5px; font-family: 'Roboto', sans-serif;">
+        <div style="text-align:center; font-weight:bold; margin-bottom:5px; border-bottom:1px solid #555;">
+            PROP HUNT
+        </div>
+
+    <div style="text-align:center; margin-bottom:10px; font-size:1.2em; padding:5px; border-radius:4px;"
+         ng-style="{'background-color': data.isHidden ? '#d32f2f' : '#388e3c'}">
+        {{ data.statusText }}
+    </div>
+
+    <div ng-if="data.gameActive" style="text-align:center; margin-bottom:6px; font-size:0.9em; color:#ff9;">
+        <div ng-if="data.hidePhase">
+            HIDE PHASE: {{ data.hideTimer | number:0 }}s
+        </div>
+        <div ng-if="!data.hidePhase">
+            ROUND: {{ data.gameTimer | number:0 }}s
+        </div>
+    </div>
+
+    <div ng-if="data.isHidden" style="text-align:center; margin-bottom:5px; font-size:0.9em; color:#ff9;">
+        PING IN: {{ data.timer | number:0 }}s
+    </div>
+
+    <div style="display:flex; gap:5px; margin-bottom:5px;">
+        <button ng-click="setRunner()" style="flex:1; background:#444; color:white; border:none; padding:4px; cursor:pointer;">
+            1. VEHICLE
+        </button>
+        <button ng-click="setProp()" style="flex:1; background:#444; color:white; border:none; padding:4px; cursor:pointer;">
+            2. PROP
+        </button>
+    </div>
+
+    <button ng-click="swap()" 
+            style="width:100%; font-weight:bold; font-size:1.1em; padding:8px; border:none; cursor:pointer; color:white;"
+            ng-style="{'background-color': data.isHidden ? '#ff9800' : '#0288d1'}">
+        {{ data.isHidden ? 'RUN AWAY (SWAP)' : 'HIDE (SWAP)' }}
+    </button>
+
+    <div style="display:flex; gap:5px; margin-top:5px;">
+        <button ng-click="taunt()"
+                style="flex:1; font-weight:bold; padding:6px; border:none; cursor:pointer; color:white; background:#9c27b0;">
+            TAUNT
+        </button>
+    </div>
+</div>
+</div>

@@ -1,0 +1,26 @@
+{
+  "phSetRunner": {
+    "cat": "vehicle",
+    "order": 1,
+    "ctx": "tlua",
+    "onDown": "extensions.PropHuntKeybinds.setRunner()",
+    "title": "Prop Hunt - Set Runner",
+    "desc": "Set your current vehicle as the runner."
+  },
+  "phTaunt": {
+    "cat": "vehicle",
+    "order": 4,
+    "ctx": "tlua",
+    "onDown": "extensions.PropHuntKeybinds.taunt()",
+    "title": "Prop Hunt - Taunt",
+    "desc": "Play the prop taunt sound."
+  },
+  "phScan": {
+    "cat": "vehicle",
+    "order": 6,
+    "ctx": "tlua",
+    "onDown": "extensions.PropHuntKeybinds.scan()",
+    "title": "Prop Hunt - Seeker Scan",
+    "desc": "(Seekers) Trigger a scanner ping beep (cooldown on server)."
+  }
+}
