@@ -10,9 +10,10 @@ Custom Prop Hunt mod with Outbreak-style visuals for BeamMP.
 - Client-side `/ph` shortcuts, HUD helpers, and Per-Vehicle taunt cooldown.
 
 ## Setup
-1. Drop the `Client` and `Server` folders into your BeamMP mod directory.
-2. Start `main.lua` server script to register commands.
-3. Ensure BeamMP route includes this mod before joining a session.
+1. Drop the `Resources/Client` and `Resources/Server` folders into your BeamMP server directory.
+2. Start a round by using `/ph start` in the chat box.
+3. If you dont see a timer in the top left press `R` and you will then see the timer.
+4. Once the hider timer has finished the Seeker will be able to move and seek for the hidden props.
 
 ## Commands
 - `/ph start [minutes]` (also `/phstart`) – start the game.
