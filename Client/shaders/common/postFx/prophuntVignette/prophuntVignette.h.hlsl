@@ -1,5 +1,5 @@
-#ifndef _OUTBREAKVIGNETTE_H_HLSL_
-#define _OUTBREAKVIGNETTE_H_HLSL_
+#ifndef _PROPHUNT_VIGNETTE_H_HLSL_
+#define _PROPHUNT_VIGNETTE_H_HLSL_
 
 #include "../postFx.h.hlsl"
 
@@ -17,4 +17,4 @@ uniform_sampler2D( backBuffer, 0 );
 
 #include "../postFx.hlsl"
 
-#endif //_OUTBREAKVIGNETTE_H_HLSL_
+#endif //_prophuntVignette _H_HLSL_
