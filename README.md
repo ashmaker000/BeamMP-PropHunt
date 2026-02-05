@@ -4,7 +4,7 @@ Custom Prop Hunt mod with Outbreak-style visuals for BeamMP.
 
 ## Highlights
 - Hider auto-disguise pipeline with prop randomization per round.
-- Hunters see blacked-out hide phase, hiders see red proximity vignettes + floating "HUNTER" tags.
+- Hunters see blacked-out hide phase, hiders see red proximity vignettes + floating " Seeker " tags.
 - Server commands (`/ph`, `/phset`, `/phprops`) control seekers, timers, and proximity settings; sync pushed via `PropHunt_Settings`.
 - Taunt system now uses BeamMP sound emitter helper with resilience against missing files.
 - Client-side `/ph` shortcuts, HUD helpers, and Per-Vehicle taunt cooldown.
