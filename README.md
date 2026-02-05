@@ -34,3 +34,6 @@ Custom Prop Hunt mod with Outbreak-style visuals for BeamMP.
 - `/ph props random` – default random prop per hider.
 - `/ph props <propKey>` – force the next round prop for every hider.
 - `/ph <setting> <value>` (client) – shortcut for taunt distance/proximity overrides (`taunt_dist`, `proximity`, `proximity_dist`, `hiderfadedist`, `hiderfilterintensity`).
+
+
+Credit to @Olrosse, @SaltySnail, @stefan750
