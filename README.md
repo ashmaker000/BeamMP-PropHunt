@@ -36,4 +36,4 @@ Custom Prop Hunt mod with Outbreak-style visuals for BeamMP.
 - `/ph <setting> <value>` (client) – shortcut for taunt distance/proximity overrides (`taunt_dist`, `proximity`, `proximity_dist`, `hiderfadedist`, `hiderfilterintensity`).
 
 
-Credit to @Olrosse, @SaltySnail, @stefan750
+Credit to [Olrosse](https://github.com/Olrosse), [SaltySnail](https://github.com/SaltySnail), [stefan750](https://github.com/stefan750)
