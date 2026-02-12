@@ -15,88 +15,38 @@ print("PropHunt Server-side main.lua loading...")
 -- ============================
 -- CONFIG (server authoritative)
 -- ============================
-local config = {
-    debug = false,
-
-    mode = "classic",        -- classic | tag
-
-    roundTime = 300,         -- main round time in seconds
-    hideTime  = 60,          -- seeker freeze countdown before hunt begins
-
-    -- Prop pool (official internal names)
-    -- Source: https://documentation.beamng.com/official_content/props/
-    propPool = {
-
-        "anticut",
-        "barrels",
-        "ball",
-        "barrier",
-        "barrier_plastic",
-        "blockwall",
-        "bollard",
-        "caravan",
-        "chair",
-        "cones",
-        "couch",
-        "crowdbarrier",
-        "delineator",
-        "engine_props",
-        "flail",
-        "flipramp",
-        "fridge",
-        "gate",
-        "haybale",
-        "kickplate",
-        "logs",
-        "marble_block",
-        "mattress",
-        "metal_box",
-        "metal_ramp",
-        "piano",
-        "porta_potty",
-        "rallyflags",
-        "rallysigns",
-        "roadsigns",
-        "rock_pile",
-        "rocks",
-        "sawhorse",
-        "shipping_container",
-        "spikestrip",
-        "steel_coil",
-        "trampoline",
-        "tirewall",
-        "trafficbarrel",
-        "trashbin",
-        "tub",
-        "tube",
-        "tv",
-        "wall",
-        "woodcrate",
-        "woodplanks",
-    },
-
-    -- seeker selection mode:
-    --   "fixed" -> seekerCount seekers
-    --   "ratio" -> ceil(playerCount * seekerRatio) (min 1, max playerCount-1)
-    seekerMode  = "fixed",
-    seekerCount = 1,
-    seekerRatio = 0.25,
-
-    -- rate limits (seconds)
-    tauntCooldown = 5,       -- minimum time between taunt requests per player
-    flashCooldown = 15,      -- minimum time between flashbang requests per player
-    tagCooldown   = 0.0,     -- allow rapid contact; we instead rate-limit same-target spam below
-    scanCooldown  = 0.1,      -- seeker scan cooldown (seconds)
-
-    -- Seeker proximity vignette (Outbreak-style, but red)
-    seekerFadeDist = 120,     -- meters: effect ramps up as seeker gets closer to a hider
-    seekerFilterIntensity = 1.35, -- 0..1 max alpha multiplier
-    hiderFadeDist = 120,      -- meters: hider vignette range
-    hiderFilterIntensity = 0.35, -- 0..1 max alpha multiplier for hider
-
-    -- Next-round-only forced prop (nil => random)
-    nextRoundForcedProp = nil
-}
+local config = {}
+do
+    local ok, mod = pcall(require, "config")
+    if ok and mod and mod.defaults then
+        for k, v in pairs(mod.defaults) do config[k] = v end
+        print("PropHunt loaded external config.lua")
+    else
+        print("PropHunt WARN: failed to load config.lua, using built-in fallback defaults")
+        config = {
+            debug = false,
+            mode = "classic",
+            roundTime = 300,
+            hideTime  = 60,
+            propPool = {"barrels", "cones", "trashbin"},
+            seekerMode  = "fixed",
+            seekerCount = 1,
+            seekerRatio = 0.25,
+            tauntCooldown = 5,
+            flashCooldown = 15,
+            tagCooldown = 0.0,
+            scanCooldown = 0.1,
+            sameTargetCooldown = 1.0,
+            seekerFadeDist = 120,
+            seekerFilterIntensity = 1.0,
+            hiderFadeDist = 120,
+            hiderFilterIntensity = 0.35,
+            joinPolicy = "lock_next_round",
+            disguiseMode = "replace",
+            nextRoundForcedProp = nil
+        }
+    end
+end
 
 local function isValidProp(key)
     for _, v in ipairs(config.propPool) do
@@ -182,7 +132,13 @@ local gameState = {
     lastTaunt = {},    -- playerID -> os.clock() timestamp
     lastFlash = {},
     lastTag   = {},
-    lastScan  = {}
+    lastScan  = {},
+    tempProps = {}, -- playerID -> serverVehicleString for temporary spawned prop
+
+    roundStartedAt = 0,
+    roundTags = 0,
+    roundEliminations = 0,
+    roundConversions = 0
 }
 
 local function now()
@@ -275,7 +231,7 @@ end
 
 local function formatSettingsPayload()
     local rid = tostring(gameState.roundId or 0)
-    return rid .. "," .. tostring(config.seekerFadeDist) .. "," .. tostring(config.seekerFilterIntensity) .. "," .. tostring(config.hiderFadeDist) .. "," .. tostring(config.hiderFilterIntensity)
+    return rid .. "," .. tostring(config.seekerFadeDist) .. "," .. tostring(config.seekerFilterIntensity) .. "," .. tostring(config.hiderFadeDist) .. "," .. tostring(config.hiderFilterIntensity) .. "," .. tostring(config.disguiseMode or "replace")
 end
 
 local function pushSettingsToClient(playerId)
@@ -295,6 +251,13 @@ local function PropHunt_StopGameInternal(reason)
     gameState.active = false
     gameState.phase = "idle"
 
+    -- clear any temporary spawned prop vehicles on all clients
+    for _, serverVeh in pairs(gameState.tempProps or {}) do
+        if serverVeh and serverVeh ~= "" then
+            MP.TriggerClientEvent(-1, "PropHunt_tempPropClear", tostring(serverVeh))
+        end
+    end
+
     -- tell clients the round ended + who won (used for UI/message)
     MP.TriggerClientEvent(-1, "PropHunt_RoundEnd", tostring(reason or ""))
     MP.TriggerClientEvent(-1, "PropHunt_GameEnd", tostring(reason or ""))
@@ -309,6 +272,22 @@ local function PropHunt_StopGameInternal(reason)
         broadcast("Game ended.")
     end
 
+    local elapsed = math.max(0, math.floor((now() - (gameState.roundStartedAt or now()))))
+    local mins = math.floor(elapsed / 60)
+    local secs = elapsed % 60
+    local winner = ((reason == "timeout" or reason == "hiders") and "HIDERS") or ((reason == "seekers") and "SEEKERS") or "NONE"
+    local reasonLabel = tostring(reason or "unknown")
+    broadcast(string.format("Summary: Winner=%s | Reason=%s | Duration=%02d:%02d | Tags=%d | Eliminations=%d | Conversions=%d | AliveHiders=%d",
+        winner,
+        reasonLabel,
+        mins,
+        secs,
+        tonumber(gameState.roundTags or 0),
+        tonumber(gameState.roundEliminations or 0),
+        tonumber(gameState.roundConversions or 0),
+        tonumber(gameState.hidersAlive or 0)
+    ))
+
     -- reset state
     gameState.players = {}
     gameState.seekerCount = 0
@@ -320,6 +299,8 @@ local function PropHunt_StopGameInternal(reason)
     gameState.lastFlash = {}
     gameState.lastTag = {}
     gameState.lastScan = {}
+    gameState.tempProps = {}
+    gameState.roundStartedAt = 0
 
     print("PropHunt Game stopped (reason=" .. tostring(reason) .. ")")
 end
@@ -406,6 +387,11 @@ function PropHunt_StartGame(optionalRoundSeconds)
     gameState.lastFlash = {}
     gameState.lastTag = {}
     gameState.lastScan = {}
+    gameState.tempProps = {}
+    gameState.roundStartedAt = now()
+    gameState.roundTags = 0
+    gameState.roundEliminations = 0
+    gameState.roundConversions = 0
 
     local seekersNeeded = computeSeekerCount(playerCount)
     local seekerSet = pickSeekers(playerList, seekersNeeded)
@@ -576,10 +562,23 @@ local function findPlayerIdByNameExact(name)
     return nil
 end
 
+local function showStatus(playerId)
+    local active = tostring(gameState.active)
+    local phase = tostring(gameState.phase)
+    local rid = tostring(gameState.roundId)
+    send(playerId, string.format("Status: active=%s phase=%s round=%s", active, phase, rid))
+    send(playerId, string.format("Players: seekers=%d hiders=%d aliveHiders=%d", tonumber(gameState.seekerCount or 0), tonumber(gameState.hiderCount or 0), tonumber(gameState.hidersAlive or 0)))
+    send(playerId, string.format("Timers: hide=%ds round=%ds", tonumber(gameState.hideTimer or 0), tonumber(gameState.roundTimer or 0)))
+    send(playerId, string.format("Config: mode=%s seekerMode=%s seekerCount=%s seekerRatio=%s", tostring(config.mode), tostring(config.seekerMode), tostring(config.seekerCount), tostring(config.seekerRatio)))
+    send(playerId, string.format("Config: hideTime=%ds roundTime=%ds joinPolicy=%s disguiseMode=%s forcedProp=%s", tonumber(config.hideTime or 60), tonumber(config.roundTime or 300), tostring(config.joinPolicy or "lock_next_round"), tostring(config.disguiseMode or "replace"), tostring(config.nextRoundForcedProp or "random")))
+    send(playerId, string.format("Visuals: seekerFade=%.1f seekerIntensity=%.2f hiderFade=%.1f hiderIntensity=%.2f", tonumber(config.seekerFadeDist or 120), tonumber(config.seekerFilterIntensity or 1), tonumber(config.hiderFadeDist or 120), tonumber(config.hiderFilterIntensity or 0.35)))
+end
+
 local function showHelp(playerId)
     send(playerId, "Server Commands:")
     send(playerId, "  /ph start [minutes] - Start game")
     send(playerId, "  /ph stop - Stop game")
+    send(playerId, "  /ph status - Round + config status")
     send(playerId, "  /ph players - List player IDs")
     send(playerId, "  /ph seeker <playerID> - Set next seeker (next round)")
     send(playerId, "  /ph seekers <id1> <id2> ... - Set seekers for next round (multiple)")
@@ -590,6 +589,8 @@ local function showHelp(playerId)
     send(playerId, "  /ph set hidetime <seconds> - Hide phase length")
     send(playerId, "  /ph set roundtime <seconds> - Round length")
     send(playerId, "  /ph set mode classic|tag - Tagging behavior")
+    send(playerId, "  /ph set joinpolicy lock_next_round|spectator|seeker|hider")
+    send(playerId, "  /ph set disguisemode replace|preload|spawnswap")
     send(playerId, "  /ph set seekerfadedist <meters> - (Seekers) proximity vignette range")
     send(playerId, "  /ph set seekerfilterintensity <0-1> - (Seekers) vignette strength")
     send(playerId, "  /ph set hiderfadedist <meters> - (Hiders) proximity vignette range")
@@ -619,6 +620,7 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             start = "/phstart",
             stop = "/phstop",
             help = "/phhelp",
+            status = "/phstatus",
             players = "/phplayers",
             seeker = "/phseeker",
             seekers = "/phseekers",
@@ -749,6 +751,9 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             send(playerId, "  ID " .. tostring(pid) .. ": " .. tostring(pname))
         end
         return 1
+    elseif msg == "/phstatus" then
+        showStatus(playerId)
+        return 1
     elseif msg == "/phhelp" then
         showHelp(playerId)
         return 1
@@ -815,6 +820,25 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             end
             config.mode = m
             broadcast("Mode set to: " .. tostring(config.mode))
+            return 1
+        elseif key == "joinpolicy" then
+            local p = tostring(words[3] or ""):lower()
+            if p ~= "lock_next_round" and p ~= "spectator" and p ~= "seeker" and p ~= "hider" then
+                send(playerId, "Usage: /phset joinpolicy lock_next_round|spectator|seeker|hider")
+                return 1
+            end
+            config.joinPolicy = p
+            broadcast("Join policy set to: " .. tostring(config.joinPolicy))
+            return 1
+        elseif key == "disguisemode" then
+            local d = tostring(words[3] or ""):lower()
+            if d ~= "replace" and d ~= "preload" and d ~= "spawnswap" then
+                send(playerId, "Usage: /phset disguisemode replace|preload|spawnswap")
+                return 1
+            end
+            config.disguiseMode = d
+            broadcast("Disguise mode set to: " .. tostring(config.disguiseMode))
+            broadcastSettings()
             return 1
         elseif key == "seekerfadedist" then
             local m = tonumber(words[3])
@@ -929,6 +953,15 @@ function PropHunt_requestState(playerId, data)
 end
 MP.RegisterEvent("PropHunt_requestState", "PropHunt_requestState")
 
+-- Temporary spawned prop registration (for cleanup on all clients)
+function PropHunt_tempPropSet(playerId, data)
+    local serverVeh = tostring(data or "")
+    if serverVeh == "" then return end
+    gameState.tempProps = gameState.tempProps or {}
+    gameState.tempProps[playerId] = serverVeh
+end
+MP.RegisterEvent("PropHunt_tempPropSet", "PropHunt_tempPropSet")
+
 -- ============================
 -- RATE LIMIT HELPERS
 -- ============================
@@ -1010,7 +1043,7 @@ function PropHunt_onTagRequest(playerId, data)
     local lastTgtId = lastTarget.id
     local lastTgtAt = lastTarget.t or -1e9
     local dtSame = now() - lastTgtAt
-    if lastTgtId == targetId and dtSame < 1.0 then
+    if lastTgtId == targetId and dtSame < (tonumber(config.sameTargetCooldown) or 1.0) then
         if config.debug then print("PropHunt[TAG] rejected: same target spam") end
         return
     end
@@ -1019,6 +1052,11 @@ function PropHunt_onTagRequest(playerId, data)
     local cd = isOnCooldown(gameState.lastTag, playerId, config.tagCooldown)
     if cd then
         if config.debug then print("PropHunt[TAG] rejected: seeker cooldown") end
+        return
+    end
+
+    if targetId == playerId then
+        if config.debug then print("PropHunt[TAG] rejected: self-target") end
         return
     end
 
@@ -1034,6 +1072,7 @@ function PropHunt_onTagRequest(playerId, data)
 
     -- record last target for anti-spam
     gameState.lastTaggedTarget[playerId] = { id = targetId, t = now() }
+    gameState.roundTags = (gameState.roundTags or 0) + 1
 
     local seekerName = gameState.players[playerId].name or (MP.GetPlayerName(playerId) or tostring(playerId))
     local hiderName  = gameState.players[targetId].name or (MP.GetPlayerName(targetId) or tostring(targetId))
@@ -1043,6 +1082,7 @@ function PropHunt_onTagRequest(playerId, data)
         gameState.players[targetId].team = "seeker"
         gameState.players[targetId].alive = true
         gameState.hidersAlive = countAliveHiders()
+        gameState.roundConversions = (gameState.roundConversions or 0) + 1
 
         broadcast(seekerName .. " converted " .. hiderName .. "!")
 
@@ -1061,11 +1101,18 @@ function PropHunt_onTagRequest(playerId, data)
         -- Classic: eliminate hider
         gameState.players[targetId].alive = false
         gameState.hidersAlive = countAliveHiders()
+        gameState.roundEliminations = (gameState.roundEliminations or 0) + 1
 
         broadcast(seekerName .. " tagged " .. hiderName .. "!")
 
         -- notify clients for UI
         MP.TriggerClientEvent(-1, "PropHunt_PlayerEliminated", tostring(targetId) .. "," .. tostring(hiderName))
+
+        local tempServerVeh = gameState.tempProps and gameState.tempProps[targetId]
+        if tempServerVeh and tempServerVeh ~= "" then
+            MP.TriggerClientEvent(-1, "PropHunt_tempPropClear", tostring(tempServerVeh))
+            gameState.tempProps[targetId] = nil
+        end
 
         -- Update team lists
         sendHiderListToSeekers()
@@ -1111,8 +1158,51 @@ end
 MP.RegisterEvent("PropHunt_ScanRequest", "PropHunt_onScanRequest")
 
 -- ============================
--- DISCONNECT HANDLER
+-- JOIN / DISCONNECT HANDLERS
 -- ============================
+function PropHunt_onPlayerJoin(playerId)
+    if not gameState.active then return end
+
+    local policy = tostring(config.joinPolicy or "lock_next_round")
+    if policy == "lock_next_round" or policy == "spectator" then
+        send(playerId, "Round in progress. You're join-locked and will play next round.")
+        return
+    end
+
+    local name = MP.GetPlayerName(playerId) or ("Player " .. tostring(playerId))
+    local teamAssigned = (policy == "hider") and "hider" or "seeker"
+    local alive = true
+
+    gameState.players[playerId] = { name = name, team = teamAssigned, alive = alive }
+    if teamAssigned == "hider" then
+        gameState.hiderCount = gameState.hiderCount + 1
+        gameState.hidersAlive = gameState.hidersAlive + 1
+    else
+        gameState.seekerCount = gameState.seekerCount + 1
+    end
+
+    MP.TriggerClientEvent(playerId, "PropHunt_GameStart", tostring(gameState.roundId) .. "," .. tostring(teamAssigned))
+    if gameState.phase == "hide" then
+        MP.TriggerClientEvent(playerId, "PropHunt_HidePhaseStart", tostring(gameState.roundId) .. "," .. tostring(gameState.hideTimer))
+        MP.TriggerClientEvent(playerId, "PropHunt_HideTimerUpdate", tostring(gameState.roundId) .. "," .. tostring(gameState.hideTimer))
+    elseif gameState.phase == "round" then
+        MP.TriggerClientEvent(playerId, "PropHunt_HidePhaseEnd", tostring(gameState.roundId))
+        MP.TriggerClientEvent(playerId, "PropHunt_RoundStart", tostring(gameState.roundId))
+        MP.TriggerClientEvent(playerId, "PropHunt_TimerUpdate", tostring(gameState.roundId) .. "," .. tostring(gameState.roundTimer))
+    end
+
+    if teamAssigned == "hider" then
+        local propName = config.nextRoundForcedProp or config.propPool[math.random(#config.propPool)]
+        gameState.players[playerId].prop = propName
+        MP.TriggerClientEvent(playerId, "PropHunt_AssignProp", tostring(gameState.roundId) .. "," .. tostring(propName))
+    end
+
+    pushSettingsToClient(playerId)
+    sendHiderListToSeekers()
+    sendSeekerListToHiders()
+    broadcast(name .. " joined mid-round as " .. string.upper(teamAssigned))
+end
+
 function PropHunt_onPlayerDisconnect(playerId)
     if not gameState.active then return end
 
@@ -1131,6 +1221,7 @@ function PropHunt_onPlayerDisconnect(playerId)
     end
 end
 
+MP.RegisterEvent("onPlayerJoin", "PropHunt_onPlayerJoin")
 MP.RegisterEvent("onPlayerDisconnect", "PropHunt_onPlayerDisconnect")
 
 print("PropHunt Server-side main.lua loaded successfully.")
