@@ -1,6 +1,9 @@
-# PropHunt for BeamMP
+# BeamMP PropHunt
 
 Server-authoritative PropHunt mode with hide phase, seeker/hider teams, prop disguises, proximity visuals, and live admin controls.
+<img width="1280" height="720" alt="BeamMP-PropHunt1" src="https://github.com/user-attachments/assets/b050d74b-0bde-467b-b131-96cdf6137aec" />
+
+---
 
 ## Highlights
 - Server-authoritative phases: `idle -> hide -> round`
