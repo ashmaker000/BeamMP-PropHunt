@@ -13,25 +13,17 @@ Server-authoritative PropHunt mode with hide phase, seeker/hider teams, prop dis
 - Round summary broadcast (winner/reason/duration/tags/conversions/elims)
 - `/ph status` live diagnostics
 
-## Structure
-- `Server/main.lua` - main server logic + command handling
-- `Server/config.lua` - server config defaults (new)
-- `Client/lua/ge/extensions/PropHunt.lua` - thin loader
-- `Client/lua/ge/extensions/prophunt/core.lua` - core client logic
-- `Client/lua/ge/extensions/prophunt/util.lua` - message/category helpers
-- `Client/lua/ge/extensions/prophunt/audio.lua` - taunt/audio emitter system
-- `Client/lua/ge/extensions/prophunt/visuals.lua` - vignette/visual helper functions
-- `Client/lua/ge/extensions/prophunt/commands.lua` - client `/ph...` command routing
-- `Client/lua/ge/extensions/prophunt/network.lua` - network event registration mapping
-- `Client/lua/ge/extensions/prophunt/disguise.lua` - hider prop-disguise pipeline
-- `Client/lua/ge/extensions/prophunt/proximity.lua` - team lists + nearest-distance queries
+## Installation
 
-## Setup
-1. Place `Client/` and `Server/` in your BeamMP mod resource.
-2. Ensure server loads `Server/main.lua`.
-3. Ensure client zip includes folders at zip root (no extra wrapper folder).
+1. Place the `BeamMP-PropHunt.zip` in your Clients folder and create a folder called `PropHunt` and add `main.lua` into your new folder.
+2. Start a round by using `/ph start` in the chat box.
+3. After a few seconds the round will start and a player will be selected.
+4. `Seeker` will be frozen for `60` seconds (but can be changed) while the `Hider` get a headstart.
+
+---
 
 ## Commands
+
 ### Core
 - `/ph help`
 - `/ph start [minutes]`
@@ -62,20 +54,11 @@ Server-authoritative PropHunt mode with hide phase, seeker/hider teams, prop dis
 - `/ph props random`
 - `/ph props <propKey>`
 
-## Config
-Edit `Server/config.lua`:
-- `roundTime`, `hideTime`
-- `mode`
-- `seekerMode`, `seekerCount`, `seekerRatio`
-- `joinPolicy`
-- `disguiseMode` (`replace` stable, `preload` experimental, `spawnswap` experimental: pre-spawn far away then swap at hide-end)
-- `tauntCooldown`, `tagCooldown`, `scanCooldown`, `sameTargetCooldown`
-- `seekerFadeDist`, `seekerFilterIntensity`
-- `hiderFadeDist`, `hiderFilterIntensity`
-- `nextRoundForcedProp`
-- `propPool`
+---
 
 ## Notes
 - `joinPolicy=lock_next_round` is safest for competitive rounds.
 - Mid-round hider joins (`joinPolicy=hider`) receive immediate prop assignment.
 - Use `/ph status` to verify state/settings during live tests.
+
+---
