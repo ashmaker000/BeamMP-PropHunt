@@ -78,6 +78,9 @@ local cleanupSweepSeconds = 15
 local seekerTabPrevention = true
 local seekerLockedVehId = nil
 local lastSeekerTabWarnAt = 0
+local postRoundCleanupUntil = 0
+local lastPostRoundCleanupSweepAt = 0
+local pendingHardDelete = {} -- serverVehicleString -> dueTime
 
 -- Round identity (server-sent) + idempotency
 local currentRoundId = nil
@@ -100,6 +103,7 @@ local onNetworkTaunt
 local onGameStart
 local onGameEnd
 local onTimerUpdate
+local clearTempPropsForOwnerPid
 local onHidePhaseStart
 local onHideTimerUpdate
 local onHidePhaseEnd
@@ -239,6 +243,31 @@ local function forceLocalVehicleVisible()
             core_vehicleBridge.executeAction(veh, 'setFreeze', false)
         end
     end)
+end
+
+local function queueHardDelete(serverVeh, delaySec)
+    local sv = tostring(serverVeh or "")
+    if sv == "" then return end
+    pendingHardDelete[sv] = os.clock() + (tonumber(delaySec) or 2.5)
+end
+
+local function pulseNicknameRenderer()
+    if not MPVehicleGE or not MPVehicleGE.hideNicknames then return end
+    local desired = (gameActive and playerTeam == "seeker") and true or false
+    pcall(function() MPVehicleGE.hideNicknames(not desired) end)
+    if scheduler and scheduler.add then
+        local t = 0
+        scheduler.add(function(dt)
+            t = t + (dt or 0)
+            if t >= 0.15 then
+                pcall(function() MPVehicleGE.hideNicknames(desired) end)
+                return false
+            end
+            return true
+        end)
+    else
+        pcall(function() MPVehicleGE.hideNicknames(desired) end)
+    end
 end
 
 local function strengthFromDistance(d, maxDist)
@@ -548,6 +577,34 @@ local function onUpdate(dt)
         if flashUiTimer < 0 then flashUiTimer = 0 end
     end
 
+    -- Post-round safety sweep: for a short window after round/game end,
+    -- repeatedly dedupe owner vehicles to kill late stale nametags.
+    if (not gameActive) and postRoundCleanupUntil and os.clock() < postRoundCleanupUntil then
+        if (os.clock() - (lastPostRoundCleanupSweepAt or 0)) >= 1.0 then
+            if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
+            lastPostRoundCleanupSweepAt = os.clock()
+        end
+    end
+
+    -- Deferred hard-delete (post-round): remove leftover temp entries safely after grace period.
+    if (not gameActive) and MPVehicleGE and MPVehicleGE.getVehicles then
+        local nowT = os.clock()
+        for svs, due in pairs(pendingHardDelete) do
+            if nowT >= (due or 0) then
+                local targetVeh = nil
+                for _, veh in pairs(MPVehicleGE.getVehicles() or {}) do
+                    if tostring(veh.serverVehicleString or "") == svs then
+                        targetVeh = veh
+                        break
+                    end
+                end
+                if targetVeh and targetVeh.delete then
+                    pcall(function() targetVeh:delete("prophunt_postround_delete") end)
+                end
+                pendingHardDelete[svs] = nil
+            end
+        end
+    end
 
     -- VEHICLE ID VALIDATION - Check if stored vehicle IDs are still valid after resets
     -- This handles the case where a vehicle is fully reset (destroyed and recreated with new ID)
@@ -843,6 +900,7 @@ onGameStart = function(data)
     playerTeam = team
     gameActive = true
     seekerLockedVehId = nil
+    pendingHardDelete = {}
     gameTimer = 300
     lastGameTimer = 300 -- reset timer tracking
 
@@ -926,6 +984,7 @@ onGameEnd = function(data)
     if MPVehicleGE and MPVehicleGE.hideNicknames then
         MPVehicleGE.hideNicknames(false)
     end
+    pulseNicknameRenderer()
 
     -- Stop vehicle-side collision checks.
     ensureVehicleExtensionsLoaded(false)
@@ -944,6 +1003,8 @@ onGameEnd = function(data)
     end
 
     if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
+    postRoundCleanupUntil = os.clock() + 5.0
+    lastPostRoundCleanupSweepAt = 0
 
     local msg = "Game Over!"
     if reason ~= "" then
@@ -1257,6 +1318,7 @@ onPlayerEliminated = function(data)
 
     -- Always clear any temp prop vehicles for this eliminated player on this client
     clearTempPropsForOwnerPid(targetId)
+    pulseNicknameRenderer()
 
     -- If it's us, revert back to our pre-disguise vehicle (best-effort)
     if MPVehicleGE and MPVehicleGE.getServerVehicleID then
@@ -1401,6 +1463,9 @@ onRoundEnd = function(data)
     end
 
     if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
+    pulseNicknameRenderer()
+    postRoundCleanupUntil = os.clock() + 5.0
+    lastPostRoundCleanupSweepAt = 0
 
     assignedPropName = nil
     originalVehId = nil
@@ -1589,6 +1654,12 @@ end
 clearTempPropByServerString = function(targetServerVeh)
     if not targetServerVeh or targetServerVeh == "" then return end
 
+    local _, idxStr = tostring(targetServerVeh):match("^(%d+)%-(%d+)$")
+    local idx = tonumber(idxStr)
+    if idx and idx > 0 then
+        queueHardDelete(targetServerVeh, 2.5)
+    end
+
     -- 1) Best-effort remove from BeamMP vehicle registry (prevents stale nametags)
     if MPVehicleGE and MPVehicleGE.onServerVehicleRemoved then
         pcall(function() MPVehicleGE.onServerVehicleRemoved(targetServerVeh) end)
@@ -1610,15 +1681,34 @@ clearTempPropByServerString = function(targetServerVeh)
                     end)
                 end
 
-                -- Avoid mutating MPVehicleGE internal vehicle table directly; can race with net events.
+                -- Scrub any remaining display-name data to prevent lingering nametags.
                 veh.ownerName = ""
                 veh.nickname = ""
+                pcall(function()
+                    if veh.setDisplayName then veh:setDisplayName("") end
+                end)
+                pcall(function()
+                    if veh.clearCustomRole then veh:clearCustomRole() end
+                end)
+
+                -- Nuke additional tag fields used by nickname renderer.
+                veh.shortname = ""
+                veh.nickPrefixes = {}
+                veh.nickSuffixes = {}
+                if veh.role then
+                    veh.role.name = ""
+                    veh.role.tag = ""
+                    veh.role.shorttag = ""
+                end
+
+                -- Do not hard-delete MPVehicleGE entry here; it can race trailer/coupler events.
+                -- Keep soft scrub + onServerVehicleRemoved path only.
             end
         end
     end
 end
 
-local function clearTempPropsForOwnerPid(ownerPid)
+clearTempPropsForOwnerPid = function(ownerPid)
     ownerPid = tonumber(ownerPid)
     if not ownerPid then return end
     if not MPVehicleGE or not MPVehicleGE.getVehicles then return end
@@ -1638,6 +1728,7 @@ onTempPropClear = function(data)
     local targetServerVeh = tostring(data or "")
     if targetServerVeh == "" then return end
     clearTempPropByServerString(targetServerVeh)
+    pulseNicknameRenderer()
 end
 
 -- owner-wide temp prop cleanup disabled (unsafe)
@@ -1679,6 +1770,7 @@ cleanupTempSpawnSwapProps = function()
         end
 
         -- Keep exactly one vehicle per owner (prefer idx=0); clear the rest.
+        local changed = false
         for _, list in pairs(byOwner) do
             local keepSvs = nil
             local bestIdx = math.huge
@@ -1695,9 +1787,11 @@ cleanupTempSpawnSwapProps = function()
             for _, v in ipairs(list) do
                 if v.svs ~= keepSvs then
                     clearTempPropByServerString(v.svs)
+                    changed = true
                 end
             end
         end
+        if changed then pulseNicknameRenderer() end
     end
 
     -- Immediate + delayed passes catch late-spawned MP vehicles on remote clients.
