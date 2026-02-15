@@ -72,6 +72,12 @@ local seekerFilterIntensity = 0.35
 local hiderFadeDist = 120
 local hiderFilterIntensity = 0.35
 local disguiseMode = "replace"
+local forceGhostOffOnRestore = true
+local spawnswapRetryCount = 2
+local cleanupSweepSeconds = 15
+local seekerTabPrevention = true
+local seekerLockedVehId = nil
+local lastSeekerTabWarnAt = 0
 
 -- Round identity (server-sent) + idempotency
 local currentRoundId = nil
@@ -222,6 +228,17 @@ end
 
 local function setProximityVignette(strength, intensity)
     visuals.setProximityVignette(strength, intensity)
+end
+
+local function forceLocalVehicleVisible()
+    local veh = be:getPlayerVehicle(0)
+    if not veh then return end
+    pcall(function() veh:queueLuaCommand('obj:setGhostEnabled(false)') end)
+    pcall(function()
+        if core_vehicleBridge and core_vehicleBridge.executeAction then
+            core_vehicleBridge.executeAction(veh, 'setFreeze', false)
+        end
+    end)
 end
 
 local function strengthFromDistance(d, maxDist)
@@ -507,9 +524,14 @@ local function triggerTaunt()
     -- Random taunt sound (vehicle-side tauntControl)
     veh:queueLuaCommand("if tauntControl then tauntControl.randomTaunt() end")
 
-    -- Network broadcast (server now allows it any time)
+    -- Network broadcast (prefer serverVehicleString for cross-client correctness)
     if MPCoreNetwork and MPCoreNetwork.isMPSession() and TriggerServerEvent then
-        TriggerServerEvent("PropHunt_TauntRequest", tostring(vehId))
+        local payload = nil
+        if MPVehicleGE and MPVehicleGE.getServerVehicleID then
+            local ok, sv = pcall(function() return MPVehicleGE.getServerVehicleID(vehId) end)
+            if ok and sv then payload = tostring(sv) end
+        end
+        TriggerServerEvent("PropHunt_TauntRequest", tostring(payload or vehId))
     end
 end
 
@@ -567,6 +589,45 @@ local function onUpdate(dt)
                             ttl = 2,
                             icon = 'info'
                         })
+                    end
+                end
+            end
+        end
+    end
+
+    -- Seeker TAB prevention: block switching into non-owned vehicles during active round.
+    if gameActive and playerTeam == "seeker" and seekerTabPrevention then
+        local veh = be:getPlayerVehicle(0)
+        if veh then
+            local vid = veh:getID()
+            local own = true
+            if MPVehicleGE and MPVehicleGE.isOwn then
+                local okOwn, isOwn = pcall(function() return MPVehicleGE.isOwn(vid) end)
+                if okOwn and isOwn ~= nil then own = (isOwn == true) end
+            end
+
+            if own then
+                seekerLockedVehId = vid
+            else
+                local target = seekerLockedVehId and be:getObjectByID(seekerLockedVehId) or nil
+                if not target and MPVehicleGE and MPVehicleGE.getVehicles and MPVehicleGE.isOwn then
+                    for _, v in pairs(MPVehicleGE.getVehicles() or {}) do
+                        local gvid = tonumber(v and v.gameVehicleID)
+                        if gvid and MPVehicleGE.isOwn(gvid) then
+                            target = be:getObjectByID(gvid)
+                            if target then
+                                seekerLockedVehId = gvid
+                                break
+                            end
+                        end
+                    end
+                end
+                if target then
+                    pcall(function() be:enterVehicle(0, target) end)
+                    local t = os.clock and os.clock() or 0
+                    if (t - lastSeekerTabWarnAt) > 1.5 then
+                        lastSeekerTabWarnAt = t
+                        beamMessage({ msg = "Seeker TAB switch blocked", ttl = 1.2, icon = 'block' })
                     end
                 end
             end
@@ -672,7 +733,18 @@ end
 
 -- --- NETWORK HANDLERS (Taunt + Flash sound) ---
 onNetworkTaunt = function(data)
-    local vehID = tonumber(data)
+    local raw = tostring(data or "")
+    local vehID = tonumber(raw)
+
+    if not vehID and MPVehicleGE and MPVehicleGE.getVehicles then
+      for _, veh in pairs(MPVehicleGE.getVehicles() or {}) do
+        if tostring(veh.serverVehicleString or "") == raw then
+          vehID = tonumber(veh.gameVehicleID)
+          break
+        end
+      end
+    end
+
     if not vehID then return end
 
     -- Don't double-taunt the owner
@@ -770,11 +842,15 @@ onGameStart = function(data)
 
     playerTeam = team
     gameActive = true
+    seekerLockedVehId = nil
     gameTimer = 300
     lastGameTimer = 300 -- reset timer tracking
 
     -- Ensure vehicle-side hooks are loaded, then start collision checks.
     ensureVehicleExtensionsLoaded(true)
+
+    -- Safety sweep for stale temp props from old rounds/builds.
+    if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
 
     if team == "seeker" then
         -- Hide nametags for seekers only (apply immediately + delayed to beat BeamMP UI refresh)
@@ -793,6 +869,8 @@ onGameStart = function(data)
             end
         end
 
+        local sv = be:getPlayerVehicle(0)
+        seekerLockedVehId = sv and sv:getID() or seekerLockedVehId
         beamMessage({
             msg = "You are a SEEKER! Find and tag the hiders!",
             ttl = 5,
@@ -831,6 +909,7 @@ onGameEnd = function(data)
     hidePhase = false
     hideTimer = 0
     allowDisguise = false
+    seekerLockedVehId = nil
 
     setSeekerVisualBlock(false)
 
@@ -851,9 +930,20 @@ onGameEnd = function(data)
     -- Stop vehicle-side collision checks.
     ensureVehicleExtensionsLoaded(false)
 
-    if disguiseMode == "spawnswap" then
-        cleanupTempSpawnSwapProps()
+    forceLocalVehicleVisible()
+    if scheduler and scheduler.add then
+        local t = 0
+        scheduler.add(function(dt)
+            t = t + (dt or 0)
+            if t >= 0.25 then
+                forceLocalVehicleVisible()
+                return false
+            end
+            return true
+        end)
     end
+
+    if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
 
     local msg = "Game Over!"
     if reason ~= "" then
@@ -942,6 +1032,9 @@ spawnAndAttachProp = function(propName)
             propStateRequestedRound = v
         end,
         getDisguiseMode = function() return disguiseMode end,
+        getForceGhostOffOnRestore = function() return forceGhostOffOnRestore end,
+        getSpawnswapRetryCount = function() return spawnswapRetryCount end,
+        getCurrentRoundId = function() return currentRoundId end,
         getPlayerTeam = function() return playerTeam end,
         getOriginalVehId = function() return originalVehId end,
         setOriginalVehId = function(v) originalVehId = v end,
@@ -955,6 +1048,9 @@ preSpawnIfNeeded = function()
     if not assignedPropName or assignedPropName == "" then return end
     disguiseMod.preSpawnProp({
         getDisguiseMode = function() return disguiseMode end,
+        getForceGhostOffOnRestore = function() return forceGhostOffOnRestore end,
+        getSpawnswapRetryCount = function() return spawnswapRetryCount end,
+        getCurrentRoundId = function() return currentRoundId end,
         getPlayerTeam = function() return playerTeam end,
         getPropVehId = function() return propVehId end,
         setPropVehId = function(v) propVehId = v end,
@@ -1159,6 +1255,9 @@ onPlayerEliminated = function(data)
         icon = 'close'
     })
 
+    -- Always clear any temp prop vehicles for this eliminated player on this client
+    clearTempPropsForOwnerPid(targetId)
+
     -- If it's us, revert back to our pre-disguise vehicle (best-effort)
     if MPVehicleGE and MPVehicleGE.getServerVehicleID then
         local myVehId = be:getPlayerVehicleID(0)
@@ -1189,7 +1288,6 @@ onPlayerEliminated = function(data)
                         end)
                     end
                     pcall(function() origVeh:queueLuaCommand('obj:setGhostEnabled(false)') end)
-                    pcall(function() origVeh:setMeshAlpha(10000, "", false) end)
                     pcall(function() origVeh:queueLuaCommand('electrics.setIgnitionLevel(3)') end)
                     pcall(function()
                         if core_vehicleBridge and core_vehicleBridge.executeAction then
@@ -1211,7 +1309,7 @@ onPlayerEliminated = function(data)
                         end
                     end
 
-                    if disguiseMode == "spawnswap" and cleanupTempSpawnSwapProps then
+                    if cleanupTempSpawnSwapProps then
                         cleanupTempSpawnSwapProps()
                     end
 
@@ -1252,7 +1350,6 @@ onRoundEnd = function(data)
             end)
         end
         pcall(function() ov:queueLuaCommand('obj:setGhostEnabled(false)') end)
-        pcall(function() ov:setMeshAlpha(10000, "", false) end)
         pcall(function() ov:queueLuaCommand('electrics.setIgnitionLevel(3)') end)
         pcall(function()
             if core_vehicleBridge and core_vehicleBridge.executeAction then
@@ -1290,9 +1387,20 @@ onRoundEnd = function(data)
         icon = 'flag'
     })
     print("DEBUG: Round ended: " .. reason)
-    if disguiseMode == "spawnswap" then
-        cleanupTempSpawnSwapProps()
+    forceLocalVehicleVisible()
+    if scheduler and scheduler.add then
+        local t = 0
+        scheduler.add(function(dt)
+            t = t + (dt or 0)
+            if t >= 0.25 then
+                forceLocalVehicleVisible()
+                return false
+            end
+            return true
+        end)
     end
+
+    if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
 
     assignedPropName = nil
     originalVehId = nil
@@ -1417,7 +1525,7 @@ onScanPulse = function(data)
 end
 
 onSettings = function(data)
-    -- data: "roundId,seekerFadeDist,seekerFilterIntensity,hiderFadeDist,hiderFilterIntensity,disguiseMode"
+    -- data: "roundId,seekerFadeDist,seekerFilterIntensity,hiderFadeDist,hiderFilterIntensity,disguiseMode,forceGhostOffOnRestore,spawnswapRetryCount,cleanupSweepSeconds"
     local parts = {}
     for part in string.gmatch(tostring(data or ""), "[^,]+") do
         table.insert(parts, part)
@@ -1455,6 +1563,26 @@ onSettings = function(data)
         end
     end
 
+    if #parts >= 7 then
+        local b = tostring(parts[7] or ""):lower()
+        forceGhostOffOnRestore = not (b == "false" or b == "0" or b == "off")
+    end
+
+    if #parts >= 8 then
+        local n = tonumber(parts[8])
+        if n then spawnswapRetryCount = math.max(1, math.floor(n)) end
+    end
+
+    if #parts >= 9 then
+        local n = tonumber(parts[9])
+        if n then cleanupSweepSeconds = math.max(1, math.floor(n)) end
+    end
+
+    if #parts >= 10 then
+        local b = tostring(parts[10] or ""):lower()
+        seekerTabPrevention = not (b == "false" or b == "0" or b == "off")
+    end
+
     preSpawnIfNeeded()
 end
 
@@ -1473,8 +1601,7 @@ clearTempPropByServerString = function(targetServerVeh)
             if tostring(veh.serverVehicleString or "") == targetServerVeh then
                 local obj = be:getObjectByID(veh.gameVehicleID)
                 if obj then
-                    pcall(function() obj:queueLuaCommand('obj:setGhostEnabled(true)') end)
-                    pcall(function() obj:setMeshAlpha(0, "", false) end)
+                    -- ghost toggle removed
                     pcall(function() obj:setActive(0) end)
                     pcall(function()
                         if core_vehicleBridge and core_vehicleBridge.executeAction then
@@ -1483,11 +1610,26 @@ clearTempPropByServerString = function(targetServerVeh)
                     end)
                 end
 
-                -- kill potential label source in MPVehicleGE cache
+                -- Avoid mutating MPVehicleGE internal vehicle table directly; can race with net events.
                 veh.ownerName = ""
                 veh.nickname = ""
-                list[k] = nil
             end
+        end
+    end
+end
+
+local function clearTempPropsForOwnerPid(ownerPid)
+    ownerPid = tonumber(ownerPid)
+    if not ownerPid then return end
+    if not MPVehicleGE or not MPVehicleGE.getVehicles then return end
+
+    for _, veh in pairs(MPVehicleGE.getVehicles() or {}) do
+        local svs = tostring(veh.serverVehicleString or "")
+        local pidStr, idxStr = svs:match("^(%d+)%-(%d+)$")
+        local pid = tonumber(pidStr)
+        local idx = tonumber(idxStr)
+        if pid and idx and pid == ownerPid and idx > 0 then
+            clearTempPropByServerString(svs)
         end
     end
 end
@@ -1497,6 +1639,8 @@ onTempPropClear = function(data)
     if targetServerVeh == "" then return end
     clearTempPropByServerString(targetServerVeh)
 end
+
+-- owner-wide temp prop cleanup disabled (unsafe)
 
 onTeamUpdate = function(data)
     -- data: "roundId,team"
@@ -1509,6 +1653,8 @@ onTeamUpdate = function(data)
             if MPVehicleGE and MPVehicleGE.hideNicknames then
                 MPVehicleGE.hideNicknames(true)
             end
+            local sv = be:getPlayerVehicle(0)
+            seekerLockedVehId = sv and sv:getID() or seekerLockedVehId
             beamMessage({ msg = "You have been CONVERTED into a SEEKER!", ttl = 4, icon = 'visibility' })
         else
             beamMessage({ msg = "Team updated: " .. tostring(team), ttl = 3, icon = 'info' })
@@ -1520,12 +1666,36 @@ cleanupTempSpawnSwapProps = function()
     local function doSweep()
         if not MPVehicleGE or not MPVehicleGE.getVehicles then return end
 
+        local byOwner = {}
         for _, veh in pairs(MPVehicleGE.getVehicles() or {}) do
             local svs = tostring(veh.serverVehicleString or "")
-            local _, idx = string.match(svs, "^(%d+)%-(%d+)$")
-            idx = tonumber(idx)
-            if idx and idx > 0 then
-                clearTempPropByServerString(svs)
+            local pidStr, idxStr = string.match(svs, "^(%d+)%-(%d+)$")
+            local pid = tonumber(pidStr)
+            local idx = tonumber(idxStr)
+            if pid and idx then
+                byOwner[pid] = byOwner[pid] or {}
+                table.insert(byOwner[pid], { svs = svs, idx = idx })
+            end
+        end
+
+        -- Keep exactly one vehicle per owner (prefer idx=0); clear the rest.
+        for _, list in pairs(byOwner) do
+            local keepSvs = nil
+            local bestIdx = math.huge
+            for _, v in ipairs(list) do
+                if v.idx == 0 then
+                    keepSvs = v.svs
+                    bestIdx = 0
+                    break
+                elseif v.idx < bestIdx then
+                    bestIdx = v.idx
+                    keepSvs = v.svs
+                end
+            end
+            for _, v in ipairs(list) do
+                if v.svs ~= keepSvs then
+                    clearTempPropByServerString(v.svs)
+                end
             end
         end
     end
@@ -1570,6 +1740,7 @@ M.onUpdate = onUpdate
 M.onVehicleSwitched = function(oldId, newId)
     -- Keep hooks attached if player changes/reloads vehicle mid-session.
     ensureVehicleExtensionsLoaded(gameActive)
+    forceLocalVehicleVisible()
     requestStateBurst()
 end
 M.onPreRender = function(dt)

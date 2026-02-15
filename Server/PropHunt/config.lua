@@ -18,10 +18,15 @@ M.defaults = {
   tagCooldown = 0.0,
   scanCooldown = 0.1,
   sameTargetCooldown = 1.0,
+  cleanupSweepSeconds = 15,
+  tempPropSweepSeconds = 15, -- legacy alias
+  forceGhostOffOnRestore = true,
+  spawnswapRetryCount = 2,
+  seekerTabPrevention = true,
 
   -- visuals
   seekerFadeDist = 120,
-  seekerFilterIntensity = 1.35,
+  seekerFilterIntensity = 1.0,
   hiderFadeDist = 120,
   hiderFilterIntensity = 0.35,
 

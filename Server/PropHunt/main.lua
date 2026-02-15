@@ -37,6 +37,11 @@ do
             tagCooldown = 0.0,
             scanCooldown = 0.1,
             sameTargetCooldown = 1.0,
+            cleanupSweepSeconds = 15,
+            tempPropSweepSeconds = 15,
+            forceGhostOffOnRestore = true,
+            spawnswapRetryCount = 2,
+            seekerTabPrevention = true,
             seekerFadeDist = 120,
             seekerFilterIntensity = 1.0,
             hiderFadeDist = 120,
@@ -47,6 +52,12 @@ do
         }
     end
 end
+
+-- Stability defaults (in case older configs omit these keys)
+if config.forceGhostOffOnRestore == nil then config.forceGhostOffOnRestore = true end
+if config.cleanupSweepSeconds == nil then config.cleanupSweepSeconds = tonumber(config.tempPropSweepSeconds or 15) or 15 end
+if config.spawnswapRetryCount == nil then config.spawnswapRetryCount = 2 end
+if config.seekerTabPrevention == nil then config.seekerTabPrevention = true end
 
 local function isValidProp(key)
     for _, v in ipairs(config.propPool) do
@@ -133,7 +144,8 @@ local gameState = {
     lastFlash = {},
     lastTag   = {},
     lastScan  = {},
-    tempProps = {}, -- playerID -> serverVehicleString for temporary spawned prop
+    tempProps = {}, -- playerID -> { [serverVehicleString]=true } for temporary spawned props
+    lastTempPropSweepAt = 0,
 
     roundStartedAt = 0,
     roundTags = 0,
@@ -231,7 +243,16 @@ end
 
 local function formatSettingsPayload()
     local rid = tostring(gameState.roundId or 0)
-    return rid .. "," .. tostring(config.seekerFadeDist) .. "," .. tostring(config.seekerFilterIntensity) .. "," .. tostring(config.hiderFadeDist) .. "," .. tostring(config.hiderFilterIntensity) .. "," .. tostring(config.disguiseMode or "replace")
+    return rid
+        .. "," .. tostring(config.seekerFadeDist)
+        .. "," .. tostring(config.seekerFilterIntensity)
+        .. "," .. tostring(config.hiderFadeDist)
+        .. "," .. tostring(config.hiderFilterIntensity)
+        .. "," .. tostring(config.disguiseMode or "replace")
+        .. "," .. tostring(config.forceGhostOffOnRestore ~= false)
+        .. "," .. tostring(math.max(1, tonumber(config.spawnswapRetryCount or 1) or 1))
+        .. "," .. tostring(math.max(1, tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15))
+        .. "," .. tostring(config.seekerTabPrevention ~= false)
 end
 
 local function pushSettingsToClient(playerId)
@@ -243,6 +264,40 @@ local function broadcastSettings()
     pushSettingsToClient(-1)
 end
 
+local function clearTempPropsForPlayer(pid, reason)
+    local set = gameState.tempProps and gameState.tempProps[pid]
+    if type(set) ~= "table" then
+        gameState.tempProps[pid] = nil
+        return
+    end
+    for serverVeh, _ in pairs(set) do
+        if serverVeh and serverVeh ~= "" then
+            MP.TriggerClientEvent(-1, "PropHunt_tempPropClear", tostring(serverVeh))
+            if config.debug then
+                print(string.format("PropHunt temp-prop cleanup: pid=%s veh=%s reason=%s", tostring(pid), tostring(serverVeh), tostring(reason or "clear")))
+            end
+        end
+    end
+    gameState.tempProps[pid] = nil
+end
+
+local function cleanupStaleTempProps(reason)
+    local playersNow = MP.GetPlayers() or {}
+    for pid, set in pairs(gameState.tempProps or {}) do
+        local p = gameState.players and gameState.players[pid] or nil
+        local connected = (playersNow[pid] ~= nil) and MP.IsPlayerConnected(pid)
+        local stale = (type(set) ~= "table")
+            or (not connected)
+            or (not p)
+            or (p.team ~= "hider")
+            or (p.alive ~= true)
+
+        if stale then
+            clearTempPropsForPlayer(pid, reason or "stale")
+        end
+    end
+end
+
 -- ============================
 -- ROUND ENDING
 -- ============================
@@ -252,10 +307,8 @@ local function PropHunt_StopGameInternal(reason)
     gameState.phase = "idle"
 
     -- clear any temporary spawned prop vehicles on all clients
-    for _, serverVeh in pairs(gameState.tempProps or {}) do
-        if serverVeh and serverVeh ~= "" then
-            MP.TriggerClientEvent(-1, "PropHunt_tempPropClear", tostring(serverVeh))
-        end
+    for pid, _ in pairs(gameState.tempProps or {}) do
+        clearTempPropsForPlayer(pid, "round_end")
     end
 
     -- tell clients the round ended + who won (used for UI/message)
@@ -300,6 +353,7 @@ local function PropHunt_StopGameInternal(reason)
     gameState.lastTag = {}
     gameState.lastScan = {}
     gameState.tempProps = {}
+    gameState.lastTempPropSweepAt = 0
     gameState.roundStartedAt = 0
 
     print("PropHunt Game stopped (reason=" .. tostring(reason) .. ")")
@@ -388,6 +442,7 @@ function PropHunt_StartGame(optionalRoundSeconds)
     gameState.lastTag = {}
     gameState.lastScan = {}
     gameState.tempProps = {}
+    gameState.lastTempPropSweepAt = now()
     gameState.roundStartedAt = now()
     gameState.roundTags = 0
     gameState.roundEliminations = 0
@@ -470,6 +525,13 @@ end
 -- ============================
 function PropHunt_onTick()
     if not gameState.active then return end
+
+    local tNow = now()
+    local sweepEvery = tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15
+    if (tNow - tonumber(gameState.lastTempPropSweepAt or 0)) >= sweepEvery then
+        cleanupStaleTempProps("tick")
+        gameState.lastTempPropSweepAt = tNow
+    end
 
     -- If players drop below 2 mid-game, stop.
     local playerCount = 0
@@ -572,6 +634,7 @@ local function showStatus(playerId)
     send(playerId, string.format("Config: mode=%s seekerMode=%s seekerCount=%s seekerRatio=%s", tostring(config.mode), tostring(config.seekerMode), tostring(config.seekerCount), tostring(config.seekerRatio)))
     send(playerId, string.format("Config: hideTime=%ds roundTime=%ds joinPolicy=%s disguiseMode=%s forcedProp=%s", tonumber(config.hideTime or 60), tonumber(config.roundTime or 300), tostring(config.joinPolicy or "lock_next_round"), tostring(config.disguiseMode or "replace"), tostring(config.nextRoundForcedProp or "random")))
     send(playerId, string.format("Visuals: seekerFade=%.1f seekerIntensity=%.2f hiderFade=%.1f hiderIntensity=%.2f", tonumber(config.seekerFadeDist or 120), tonumber(config.seekerFilterIntensity or 1), tonumber(config.hiderFadeDist or 120), tonumber(config.hiderFilterIntensity or 0.35)))
+    send(playerId, string.format("Stability: forceGhostOffOnRestore=%s cleanupSweepSeconds=%s spawnswapRetryCount=%s seekerTabPrevention=%s", tostring(config.forceGhostOffOnRestore ~= false), tostring(tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15), tostring(tonumber(config.spawnswapRetryCount or 1) or 1), tostring(config.seekerTabPrevention ~= false)))
 end
 
 local function showHelp(playerId)
@@ -591,6 +654,10 @@ local function showHelp(playerId)
     send(playerId, "  /ph set mode classic|tag - Tagging behavior")
     send(playerId, "  /ph set joinpolicy lock_next_round|spectator|seeker|hider")
     send(playerId, "  /ph set disguisemode replace|preload|spawnswap")
+    send(playerId, "  /ph set forceghostoff <on|off>")
+    send(playerId, "  /ph set cleanupsweep <seconds>")
+    send(playerId, "  /ph set spawnswapretry <n>")
+    send(playerId, "  /ph set seekertablock <on|off>")
     send(playerId, "  /ph set seekerfadedist <meters> - (Seekers) proximity vignette range")
     send(playerId, "  /ph set seekerfilterintensity <0-1> - (Seekers) vignette strength")
     send(playerId, "  /ph set hiderfadedist <meters> - (Hiders) proximity vignette range")
@@ -840,6 +907,47 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             broadcast("Disguise mode set to: " .. tostring(config.disguiseMode))
             broadcastSettings()
             return 1
+        elseif key == "forceghostoff" then
+            local v = tostring(words[3] or ""):lower()
+            if v ~= "on" and v ~= "off" then
+                send(playerId, "Usage: /phset forceghostoff <on|off>")
+                return 1
+            end
+            config.forceGhostOffOnRestore = (v == "on")
+            broadcast("forceGhostOffOnRestore=" .. tostring(config.forceGhostOffOnRestore))
+            broadcastSettings()
+            return 1
+        elseif key == "cleanupsweep" then
+            local s = tonumber(words[3])
+            if not s then
+                send(playerId, "Usage: /phset cleanupsweep <seconds>")
+                return 1
+            end
+            config.cleanupSweepSeconds = clamp(math.floor(s), 1, 600)
+            config.tempPropSweepSeconds = config.cleanupSweepSeconds
+            broadcast("cleanupSweepSeconds=" .. tostring(config.cleanupSweepSeconds))
+            broadcastSettings()
+            return 1
+        elseif key == "spawnswapretry" then
+            local n = tonumber(words[3])
+            if not n then
+                send(playerId, "Usage: /phset spawnswapretry <n>")
+                return 1
+            end
+            config.spawnswapRetryCount = clamp(math.floor(n), 1, 10)
+            broadcast("spawnswapRetryCount=" .. tostring(config.spawnswapRetryCount))
+            broadcastSettings()
+            return 1
+        elseif key == "seekertablock" then
+            local v = tostring(words[3] or ""):lower()
+            if v ~= "on" and v ~= "off" then
+                send(playerId, "Usage: /phset seekertablock <on|off>")
+                return 1
+            end
+            config.seekerTabPrevention = (v == "on")
+            broadcast("seekerTabPrevention=" .. tostring(config.seekerTabPrevention))
+            broadcastSettings()
+            return 1
         elseif key == "seekerfadedist" then
             local m = tonumber(words[3])
             if not m then
@@ -955,10 +1063,24 @@ MP.RegisterEvent("PropHunt_requestState", "PropHunt_requestState")
 
 -- Temporary spawned prop registration (for cleanup on all clients)
 function PropHunt_tempPropSet(playerId, data)
-    local serverVeh = tostring(data or "")
+    local raw = tostring(data or "")
+    if raw == "" then return end
+
+    local ridStr, sv = raw:match("^(%d+)%|(.+)$")
+    local rid = tonumber(ridStr)
+    local serverVeh = tostring(sv or raw)
+
     if serverVeh == "" then return end
+    if rid and ((not gameState.active) or rid ~= tonumber(gameState.roundId or -1)) then
+        if config.debug then
+            print(string.format("PropHunt temp-prop ignore stale report: pid=%s rid=%s current=%s veh=%s", tostring(playerId), tostring(rid), tostring(gameState.roundId), tostring(serverVeh)))
+        end
+        return
+    end
+
     gameState.tempProps = gameState.tempProps or {}
-    gameState.tempProps[playerId] = serverVeh
+    gameState.tempProps[playerId] = gameState.tempProps[playerId] or {}
+    gameState.tempProps[playerId][serverVeh] = true
 end
 MP.RegisterEvent("PropHunt_tempPropSet", "PropHunt_tempPropSet")
 
@@ -978,17 +1100,20 @@ end
 -- ============================
 -- TAUNT EVENT
 -- ============================
--- Client calls: TriggerServerEvent("PropHunt_TauntRequest", vehID)
--- Server broadcasts to all: "PropHunt_Taunt" => vehID
+-- Client calls: TriggerServerEvent("PropHunt_TauntRequest", payload)
+-- payload is preferred as serverVehicleString ("<ownerPid>-<vehIdx>"); legacy numeric vehID still accepted.
+-- Server broadcasts to all: "PropHunt_Taunt" => payload
 --
 -- Rules:
 --  - Allowed any time
 --  - Server enforces per-player cooldown
 -- ============================
 function PropHunt_onTauntRequest(playerId, data)
-    local vehId = tonumber(data)
-    if not vehId then
-        print("PropHunt TauntRequest ERROR: invalid vehId")
+    local payload = tostring(data or "")
+    local isServerVeh = payload:match("^%d+%-%d+$") ~= nil
+    local vehId = tonumber(payload)
+    if (not isServerVeh) and (not vehId) then
+        print("PropHunt TauntRequest ERROR: invalid payload")
         return
     end
     if not gameState.active then return end
@@ -1001,7 +1126,7 @@ function PropHunt_onTauntRequest(playerId, data)
         return
     end
 
-    MP.TriggerClientEvent(-1, "PropHunt_Taunt", tostring(vehId))
+    MP.TriggerClientEvent(-1, "PropHunt_Taunt", payload)
 end
 
 MP.RegisterEvent("PropHunt_TauntRequest", "PropHunt_onTauntRequest")
@@ -1108,11 +1233,7 @@ function PropHunt_onTagRequest(playerId, data)
         -- notify clients for UI
         MP.TriggerClientEvent(-1, "PropHunt_PlayerEliminated", tostring(targetId) .. "," .. tostring(hiderName))
 
-        local tempServerVeh = gameState.tempProps and gameState.tempProps[targetId]
-        if tempServerVeh and tempServerVeh ~= "" then
-            MP.TriggerClientEvent(-1, "PropHunt_tempPropClear", tostring(tempServerVeh))
-            gameState.tempProps[targetId] = nil
-        end
+        clearTempPropsForPlayer(targetId, "tagged")
 
         -- Update team lists
         sendHiderListToSeekers()
@@ -1206,6 +1327,9 @@ end
 function PropHunt_onPlayerDisconnect(playerId)
     if not gameState.active then return end
 
+    clearTempPropsForPlayer(playerId, "disconnect")
+    -- owner-fallback cleanup disabled (could remove live vehicles)
+
     if gameState.players[playerId] then
         gameState.players[playerId] = nil
         gameState.hidersAlive = countAliveHiders()
@@ -1219,6 +1343,8 @@ function PropHunt_onPlayerDisconnect(playerId)
             PropHunt_StopGameInternal("seekers")
         end
     end
+
+    cleanupStaleTempProps("disconnect")
 end
 
 MP.RegisterEvent("onPlayerJoin", "PropHunt_onPlayerJoin")

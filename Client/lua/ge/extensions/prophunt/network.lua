@@ -1,7 +1,13 @@
 local M = {}
 M.BUILD = "2026-02-11-phase2e"
 
+local isRegistered = false
+
 function M.register(handlers)
+  if isRegistered then
+    print("DEBUG: PropHunt network handlers already registered; skipping duplicate register")
+    return true
+  end
   if not AddEventHandler then
     print("ERROR: AddEventHandler not available - BeamMP client events cannot be registered")
     return false
@@ -48,7 +54,9 @@ function M.register(handlers)
   print("DEBUG: Registered handler for PropHunt_Settings")
   AddEventHandler("PropHunt_tempPropClear", handlers.onTempPropClear)
   print("DEBUG: Registered handler for PropHunt_tempPropClear")
+  -- tempPropClearOwner disabled (unsafe over-broad cleanup)
 
+  isRegistered = true
   return true
 end
 

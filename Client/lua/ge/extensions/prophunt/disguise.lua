@@ -106,6 +106,46 @@ local function spawnPropVehicle(modelKey)
   return newId, nil
 end
 
+local function reportTempPropServerString(gameVehId, retrySeconds, roundId)
+  if not TriggerServerEvent or not MPVehicleGE or not gameVehId then return end
+
+  local function trySend()
+    local serverVeh = nil
+    if MPVehicleGE.getVehicles then
+      for _, veh in pairs(MPVehicleGE.getVehicles() or {}) do
+        if tonumber(veh.gameVehicleID) == tonumber(gameVehId) then
+          serverVeh = tostring(veh.serverVehicleString or "")
+          break
+        end
+      end
+    end
+    if (not serverVeh or serverVeh == "") and MPVehicleGE.getServerVehicleID then
+      local ok, sv = pcall(function() return MPVehicleGE.getServerVehicleID(gameVehId) end)
+      if ok and sv then serverVeh = tostring(sv) end
+    end
+    if serverVeh and serverVeh ~= "" then
+      local rid = tonumber(roundId)
+      if rid then
+        TriggerServerEvent("PropHunt_tempPropSet", string.format("%d|%s", rid, serverVeh))
+      else
+        TriggerServerEvent("PropHunt_tempPropSet", serverVeh)
+      end
+      return true
+    end
+    return false
+  end
+
+  if trySend() then return end
+  if scheduler and scheduler.add then
+    local waited, maxWait = 0, (tonumber(retrySeconds) or 2.0)
+    scheduler.add(function(dt)
+      waited = waited + (dt or 0)
+      if trySend() then return false end
+      return waited < maxWait
+    end)
+  end
+end
+
 local function stashVehicleFarAway(veh, refPos, refRot)
   if not veh or not refPos then return end
   local x = refPos.x + 5000
@@ -118,8 +158,6 @@ local function stashVehicleFarAway(veh, refPos, refRot)
   if veh.setPositionRotation then
     pcall(function() veh:setPositionRotation(x, y, z, rx, ry, rz, rw) end)
   end
-  pcall(function() veh:queueLuaCommand('obj:setGhostEnabled(true)') end)
-  pcall(function() veh:setMeshAlpha(0, "", false) end)
   pcall(function() veh:queueLuaCommand('electrics.setIgnitionLevel(0)') end)
   pcall(function()
     if core_vehicleBridge and core_vehicleBridge.executeAction then
@@ -128,10 +166,11 @@ local function stashVehicleFarAway(veh, refPos, refRot)
   end)
 end
 
-local function restoreVehicle(veh)
+local function restoreVehicle(veh, forceGhostOff)
   if not veh then return end
-  pcall(function() veh:queueLuaCommand('obj:setGhostEnabled(false)') end)
-  pcall(function() veh:setMeshAlpha(10000, "", false) end)
+  if forceGhostOff ~= false then
+    pcall(function() veh:queueLuaCommand('obj:setGhostEnabled(false)') end)
+  end
   pcall(function() veh:queueLuaCommand('electrics.setIgnitionLevel(3)') end)
   pcall(function()
     if core_vehicleBridge and core_vehicleBridge.executeAction then
@@ -166,52 +205,13 @@ function M.preSpawnProp(ctx, propName)
 
   stashVehicleFarAway(newVeh, myPos, myRot)
 
-  -- Some builds auto-switch player control/camera to newly spawned vehicle.
-  -- Force the player back to their original car during hide phase.
   local original = be:getObjectByID(myVehId)
-  if original then
-    pcall(function() be:enterVehicle(0, original) end)
-  end
+  if original then pcall(function() be:enterVehicle(0, original) end) end
 
   if ctx.setPropVehId then ctx.setPropVehId(newId) end
   if ctx.setOriginalVehId then ctx.setOriginalVehId(myVehId) end
 
-  local function reportTempProp()
-    if not TriggerServerEvent then return end
-    if not MPVehicleGE then return end
-
-    local serverVeh = nil
-
-    -- Prefer direct lookup from MPVehicleGE cache to avoid noisy getServerVehicleID errors
-    if MPVehicleGE.getVehicles then
-      for _, veh in pairs(MPVehicleGE.getVehicles() or {}) do
-        if tonumber(veh.gameVehicleID) == tonumber(newId) then
-          serverVeh = tostring(veh.serverVehicleString or "")
-          break
-        end
-      end
-    end
-
-    -- Fallback if cache has not populated yet
-    if (not serverVeh or serverVeh == "") and MPVehicleGE.getServerVehicleID then
-      local ok, sv = pcall(function() return MPVehicleGE.getServerVehicleID(newId) end)
-      if ok and sv then serverVeh = tostring(sv) end
-    end
-
-    if serverVeh and serverVeh ~= "" then
-      TriggerServerEvent("PropHunt_tempPropSet", serverVeh)
-    end
-  end
-
-  reportTempProp()
-  if scheduler and scheduler.add then
-    local waited = 0
-    scheduler.add(function(dt)
-      waited = waited + (dt or 0)
-      reportTempProp()
-      return waited < 2.0
-    end)
-  end
+  reportTempPropServerString(newId, 2.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
 
   print("DEBUG: PRESPAWN_OK propId=" .. tostring(newId) .. " originalId=" .. tostring(myVehId))
 end
@@ -239,6 +239,8 @@ function M.spawnAndAttachProp(ctx, propName)
   end
 
   local mode = (ctx.getDisguiseMode and tostring(ctx.getDisguiseMode() or "replace"):lower()) or "replace"
+  local forceGhostOff = (ctx.getForceGhostOffOnRestore and ctx.getForceGhostOffOnRestore() ~= false) or true
+  local retryCount = math.max(1, math.floor((ctx.getSpawnswapRetryCount and tonumber(ctx.getSpawnswapRetryCount())) or 1))
 
   local function doReplace(key)
     local cfgKey = pickRandomPropConfig(key)
@@ -250,11 +252,12 @@ function M.spawnAndAttachProp(ctx, propName)
     local veh = be:getPlayerVehicle(0)
     if not veh then return end
     if enable then
-      pcall(function() veh:queueLuaCommand('obj:setGhostEnabled(true)') end)
-      pcall(function() veh:setMeshAlpha(0, "", false) end)
+      if forceGhostOff == false then
+        pcall(function() veh:queueLuaCommand('obj:setGhostEnabled(true)') end)
+      end
       pcall(function() veh:queueLuaCommand('electrics.setIgnitionLevel(0)') end)
     else
-      restoreVehicle(veh)
+      restoreVehicle(veh, forceGhostOff)
     end
   end
 
@@ -270,17 +273,20 @@ function M.spawnAndAttachProp(ctx, propName)
     local newId = ctx.getPropVehId and ctx.getPropVehId() or nil
     local newVeh = newId and be:getObjectByID(newId) or nil
 
-    if newVeh then
-      print("DEBUG: SWAP_USING_PRESPAWN propId=" .. tostring(newId))
-    end
-
     if not newVeh then
-      print("DEBUG: SWAP_NO_PRESPAWN - spawning at swap time")
-      local spawnedId, spawnErr = spawnPropVehicle(key)
-      if not spawnedId then return false, spawnErr end
-      newId = spawnedId
-      newVeh = be:getObjectByID(newId)
-      if not newVeh then return false, "spawned vehicle object missing" end
+      local lastErr = "spawn failed"
+      for _ = 1, retryCount do
+        local spawnedId, spawnErr = spawnPropVehicle(key)
+        if spawnedId then
+          newId = spawnedId
+          newVeh = be:getObjectByID(newId)
+          if newVeh then break end
+          lastErr = "spawned vehicle object missing"
+        else
+          lastErr = tostring(spawnErr or lastErr)
+        end
+      end
+      if not newVeh then return false, lastErr end
     end
 
     if oldPos and oldRot and newVeh.setPositionRotation then
@@ -288,12 +294,16 @@ function M.spawnAndAttachProp(ctx, propName)
         newVeh:setPositionRotation(oldPos.x, oldPos.y, oldPos.z, oldRot.x, oldRot.y, oldRot.z, oldRot.w)
       end)
     end
-    restoreVehicle(newVeh)
+    restoreVehicle(newVeh, forceGhostOff)
+    if forceGhostOff == false then
+      pcall(function() newVeh:queueLuaCommand('obj:setGhostEnabled(true)') end)
+    end
     pcall(function() be:enterVehicle(0, newVeh) end)
 
     stashVehicleFarAway(myVeh, oldPos, oldRot)
 
     if ctx.setPropVehId then ctx.setPropVehId(newId) end
+    reportTempPropServerString(newId, 2.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
     return true
   end
 
