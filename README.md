@@ -18,10 +18,11 @@ Server-authoritative PropHunt mode with hide phase, seeker/hider teams, prop dis
 
 ## Installation
 
-1. Place the `BeamMP-PropHunt.zip` in your Clients folder and create a folder called `PropHunt` and add `main.lua` into your new folder.
-2. Start a round by using `/ph start` in the chat box.
-3. After a few seconds the round will start and a player will be selected.
-4. `Seeker` will be frozen for `60` seconds (but can be changed) while the `Hider` get a headstart.
+1. Unpack `BeamMP-PropHunt.zip` and your see `Client` and `Server` folders
+2. Go into your `Client folder` on your server and place the `BeamMP-PropHunt.zip`, then head to your `Server folder` and create a folder called `Tag` and add `main.lua` into your new folder.
+3. Start a round by using `/ph start` in the chat box.
+4. After a few seconds the round will start and a player will be selected.
+5. `Seeker` will be frozen for `60` seconds (but can be changed) while the `Hider` get a headstart.
 
 ---
 
