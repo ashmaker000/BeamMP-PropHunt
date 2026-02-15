@@ -16,13 +16,39 @@ Server-authoritative PropHunt mode with hide phase, seeker/hider teams, prop dis
 - Round summary broadcast (winner/reason/duration/tags/conversions/elims)
 - `/ph status` live diagnostics
 
-## Installation
+### Installation
 
-1. Unpack `BeamMP-PropHunt.zip` and your see `Client` and `Server` folders
-2. Go into your `Client folder` on your server and place the `BeamMP-PropHunt.zip`, then head to your `Server folder` and create a folder called `Tag` and add `main.lua` into your new folder.
-3. Start a round by using `/ph start` in the chat box.
-4. After a few seconds the round will start and a player will be selected.
-5. `Seeker` will be frozen for `60` seconds (but can be changed) while the `Hider` get a headstart.
+1. **Download the release**
+
+   * Go to the **Releases** page.
+   * Download the latest `.zip` file.
+
+2. **Extract the files**
+
+   * Unzip the download.
+   * You will get two folders:
+
+     * `Client`
+     * `Server`
+
+3. **Install the client files**
+
+   * Open the extracted **Client** folder.
+   * Inside it is a `.zip` file.
+   * Upload that `.zip` into your server’s **client mods folder**.
+
+4. **Install the server files**
+
+   * Open the extracted **Server** folder.
+   * Inside is a folder for the game mode (e.g. `CarHunt`, `Tag`, `PropHunt` etc.).
+   * On your server, open the main **server folder**.
+   * Create a folder for that game mode (for example: `CarHunt`, `Tag`, `PropHunt`).
+   * Copy **all files** from the extracted game mode folder into the matching folder you just created on the server.
+
+5. **Restart the server**
+
+   * Restart your BeamMP server.
+   * The game mode should now be active.
 
 ---
 
