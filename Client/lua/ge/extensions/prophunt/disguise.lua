@@ -89,6 +89,35 @@ local function ensureModelAndLabel(propName)
   return modelKey, modelLabel
 end
 
+local function capturePreDisguise(ctx)
+  local curVehId = be:getPlayerVehicleID(0)
+  if not curVehId then return end
+
+  local modelKey = nil
+  local cfgKey = nil
+
+  if extensions and extensions.core_vehicle_manager and extensions.core_vehicle_manager.getVehicleData then
+    local ok, vd = pcall(function() return extensions.core_vehicle_manager.getVehicleData(curVehId) end)
+    if ok and vd and vd.config then
+      if vd.config.model and vd.config.model ~= '' then modelKey = vd.config.model end
+      if vd.config.partConfigFilename and vd.config.partConfigFilename ~= '' then cfgKey = vd.config.partConfigFilename end
+    end
+  end
+
+  if (not modelKey or modelKey == '') and MPVehicleGE and MPVehicleGE.getVehicleByGameID then
+    local v = MPVehicleGE.getVehicleByGameID(curVehId)
+    if v and v.jbeam then modelKey = v.jbeam end
+    if (not cfgKey or cfgKey == '') and v and v.partConfigFilename then cfgKey = v.partConfigFilename end
+  end
+
+  if ctx and ctx.setPreDisguiseModelKey and modelKey and modelKey ~= '' then
+    pcall(function() ctx.setPreDisguiseModelKey(modelKey) end)
+  end
+  if ctx and ctx.setPreDisguiseConfig and cfgKey and cfgKey ~= '' then
+    pcall(function() ctx.setPreDisguiseConfig(cfgKey) end)
+  end
+end
+
 local function spawnPropVehicle(modelKey)
   local cfgKey = pickRandomPropConfig(modelKey)
   local before = snapshotVehicleIds()
@@ -106,8 +135,14 @@ local function spawnPropVehicle(modelKey)
   return newId, nil
 end
 
-local function reportTempPropServerString(gameVehId, retrySeconds, roundId)
-  if not TriggerServerEvent or not MPVehicleGE or not gameVehId then return end
+local function reportTempPropServerString(ctx, gameVehId, retrySeconds, roundId)
+  if not TriggerServerEvent or not MPVehicleGE or not gameVehId then return false end
+
+  local function authorityFailed(reason)
+    if ctx and ctx.disableSpawnswapForRound then
+      pcall(function() ctx.disableSpawnswapForRound(reason or "authority_failed") end)
+    end
+  end
 
   local function trySend()
     local serverVeh = nil
@@ -135,15 +170,24 @@ local function reportTempPropServerString(gameVehId, retrySeconds, roundId)
     return false
   end
 
-  if trySend() then return end
+  if trySend() then return true end
   if scheduler and scheduler.add then
     local waited, maxWait = 0, (tonumber(retrySeconds) or 2.0)
     scheduler.add(function(dt)
       waited = waited + (dt or 0)
       if trySend() then return false end
-      return waited < maxWait
+      if waited >= maxWait then
+        authorityFailed("no_server_vehicle_id")
+        return false
+      end
+      return true
     end)
+    return false
   end
+
+  -- If scheduler is unavailable, do not hard-disable this round here.
+  -- Let caller decide/fallback at disguise time.
+  return false
 end
 
 local function stashVehicleFarAway(veh, refPos, refRot)
@@ -182,7 +226,14 @@ end
 function M.preSpawnProp(ctx, propName)
   if ctx.getPlayerTeam and ctx.getPlayerTeam() ~= "hider" then return end
   local mode = (ctx.getDisguiseMode and tostring(ctx.getDisguiseMode() or "replace"):lower()) or "replace"
+  local effectiveMode = mode
+  if mode == "spawnswap" and ctx.isSpawnswapDisabledForRound and ctx.isSpawnswapDisabledForRound() then
+    effectiveMode = "replace"
+  end
   if mode ~= "spawnswap" then return end
+  if ctx.isSpawnswapDisabledForRound and ctx.isSpawnswapDisabledForRound() then return end
+  if ctx.isPreSpawnAttemptedThisRound and ctx.isPreSpawnAttemptedThisRound() then return end
+  if ctx.markPreSpawnAttemptedThisRound then ctx.markPreSpawnAttemptedThisRound() end
 
   if ctx.getPropVehId and ctx.getPropVehId() then
     local existing = be:getObjectByID(ctx.getPropVehId())
@@ -211,7 +262,7 @@ function M.preSpawnProp(ctx, propName)
   if ctx.setPropVehId then ctx.setPropVehId(newId) end
   if ctx.setOriginalVehId then ctx.setOriginalVehId(myVehId) end
 
-  reportTempPropServerString(newId, 2.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
+  reportTempPropServerString(ctx, newId, 2.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
 
   print("DEBUG: PRESPAWN_OK propId=" .. tostring(newId) .. " originalId=" .. tostring(myVehId))
 end
@@ -243,6 +294,7 @@ function M.spawnAndAttachProp(ctx, propName)
   local retryCount = math.max(1, math.floor((ctx.getSpawnswapRetryCount and tonumber(ctx.getSpawnswapRetryCount())) or 1))
 
   local function doReplace(key)
+    capturePreDisguise(ctx)
     local cfgKey = pickRandomPropConfig(key)
     if cfgKey then core_vehicles.replaceVehicle(key, { config = cfgKey })
     else core_vehicles.replaceVehicle(key, {}) end
@@ -303,23 +355,39 @@ function M.spawnAndAttachProp(ctx, propName)
     stashVehicleFarAway(myVeh, oldPos, oldRot)
 
     if ctx.setPropVehId then ctx.setPropVehId(newId) end
-    reportTempPropServerString(newId, 2.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
+    reportTempPropServerString(ctx, newId, 2.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
     return true
   end
 
   local ok, err
-  if mode == "preload" then
+  if effectiveMode == "preload" then
     applyPreloadMask(true)
     ok, err = pcall(function() doReplace(modelKey) end)
     applyPreloadMask(false)
-  elseif mode == "spawnswap" then
+  elseif effectiveMode == "spawnswap" then
     ok, err = doSpawnSwap(modelKey)
   else
     ok, err = pcall(function() doReplace(modelKey) end)
   end
 
   if not ok then
-    print("WARN: disguise failed for '" .. tostring(modelKey) .. "' => " .. tostring(err) .. "; fallback replace(random)")
+    if effectiveMode == "spawnswap" then
+      if ctx.disableSpawnswapForRound then
+        pcall(function() ctx.disableSpawnswapForRound("spawnswap_disguise_failed") end)
+      end
+      -- Fail closed for spawnswap loop, but immediately fall back to replace so gameplay continues.
+      local okReplace, errReplace = pcall(function() doReplace(modelKey) end)
+      if okReplace then
+        ok = true
+        effectiveMode = "replace"
+        ctx.beamMessage({ msg = "Spawnswap rejected; using replace fallback", ttl = 3, icon = 'warning' })
+      else
+        err = errReplace
+      end
+    end
+
+    if not ok then
+      print("WARN: disguise failed for '" .. tostring(modelKey) .. "' => " .. tostring(err) .. "; fallback replace(random)")
     local k, name = pickRandomPropModelKey()
     if not k then
       ctx.beamMessage({ msg = "Prop disguise failed: " .. tostring(modelKey), ttl = 4, icon = 'error' })
@@ -329,13 +397,14 @@ function M.spawnAndAttachProp(ctx, propName)
     modelKey = k
     modelLabel = name or k
     ok, err = pcall(function() doReplace(modelKey) end)
+    end
   end
 
   if ok then
     ctx.setDisguised(true)
     ctx.setPropStateRequestedRound(nil)
     ctx.beamMessage({ msg = "Disguised as prop: " .. tostring(modelLabel), ttl = 4, icon = 'local_shipping' })
-    print("DEBUG: Disguise success: " .. tostring(modelKey) .. " (mode=" .. tostring(mode) .. ")")
+    print("DEBUG: Disguise success: " .. tostring(modelKey) .. " (mode=" .. tostring(effectiveMode) .. ")")
   else
     ctx.beamMessage({ msg = "Prop disguise failed: " .. tostring(modelKey), ttl = 4, icon = 'error' })
     print("ERROR: Failed to disguise as '" .. tostring(modelKey) .. "': " .. tostring(err))

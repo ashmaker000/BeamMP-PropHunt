@@ -28,6 +28,7 @@ do
             mode = "classic",
             roundTime = 300,
             hideTime  = 60,
+            allowSoloTest = false,
             propPool = {"barrels", "cones", "trashbin"},
             seekerMode  = "fixed",
             seekerCount = 1,
@@ -58,7 +59,11 @@ do
             minEventGapScan = 0.05,
             requireTagCorroboration = true,
             requireMutualContact = false,
-            tagCorroborationWindow = 0.35
+            tagCorroborationWindow = 0.35,
+            currentPreset = "casual",
+            mapProfiles = { west_coast_usa = "ranked", utah = "casual" },
+            propTierMode = "all",
+            perksEnabled = true
         }
     end
 end
@@ -67,6 +72,7 @@ end
 if config.forceGhostOffOnRestore == nil then config.forceGhostOffOnRestore = true end
 if config.cleanupSweepSeconds == nil then config.cleanupSweepSeconds = tonumber(config.tempPropSweepSeconds or 15) or 15 end
 if config.spawnswapRetryCount == nil then config.spawnswapRetryCount = 2 end
+if config.allowSoloTest == nil then config.allowSoloTest = false end
 if config.seekerTabPrevention == nil then config.seekerTabPrevention = true end
 if config.adminAclEnabled == nil then config.adminAclEnabled = false end
 if config.adminIds == nil then config.adminIds = {} end
@@ -78,6 +84,11 @@ if config.minEventGapScan == nil then config.minEventGapScan = 0.05 end
 if config.requireTagCorroboration == nil then config.requireTagCorroboration = true end
 if config.requireMutualContact == nil then config.requireMutualContact = false end
 if config.tagCorroborationWindow == nil then config.tagCorroborationWindow = 0.35 end
+if config.currentPreset == nil then config.currentPreset = "casual" end
+if config.mapProfiles == nil then config.mapProfiles = {} end
+if config.spawnBanks == nil then config.spawnBanks = {} end
+if config.propTierMode == nil then config.propTierMode = "all" end
+if config.perksEnabled == nil then config.perksEnabled = true end
 
 local function isValidProp(key)
     for _, v in ipairs(config.propPool) do
@@ -124,6 +135,126 @@ local function shuffleList(src)
 end
 
 
+local gameState
+local pushHudPulse
+
+local PRESET_DEFS = {
+    casual = { seekerMode = "fixed", seekerCount = 1, hideTime = 60, roundTime = 300, scanCooldown = 0.15, tauntCooldown = 5, propTierMode = "all" },
+    ranked = { seekerMode = "ratio", seekerRatio = 0.28, hideTime = 45, roundTime = 240, scanCooldown = 0.25, tauntCooldown = 6, sameTargetCooldown = 1.2, propTierMode = "ranked" },
+    chaos = { seekerMode = "ratio", seekerRatio = 0.40, hideTime = 25, roundTime = 210, scanCooldown = 0.08, tauntCooldown = 3, sameTargetCooldown = 0.7, propTierMode = "chaos" },
+}
+
+local PROP_TIERS = {
+    tiny = { ball=true, cones=true, bollard=true, delineator=true, spikestrip=true },
+    hard = { trashbin=true, trafficbarrel=true, tirewall=true, sawhorse=true, roadsigns=true, rallysigns=true },
+}
+
+local function applyPreset(name)
+    local p = PRESET_DEFS[tostring(name or "")]
+    if not p then return false end
+    for k, v in pairs(p) do config[k] = v end
+    config.currentPreset = tostring(name)
+    return true
+end
+
+local function propAllowedByTier(propName)
+    local mode = tostring(config.propTierMode or "all")
+    if mode == "all" then return true end
+    local pn = tostring(propName or "")
+    local tiny = PROP_TIERS.tiny[pn] == true
+    local hard = PROP_TIERS.hard[pn] == true
+    if mode == "ranked" then
+        return (not tiny) and (not hard)
+    elseif mode == "chaos" then
+        return true
+    end
+    return true
+end
+
+local function getMapKey()
+    if MP and MP.GetServerConfig and type(MP.GetServerConfig) == "function" then
+        local ok, cfgObj = pcall(MP.GetServerConfig)
+        if ok and type(cfgObj) == "table" then
+            local m = tostring(cfgObj.Map or cfgObj.map or cfgObj.level or ""):lower()
+            if m ~= "" then return m end
+        end
+    end
+    return tostring(gameState.currentMapKey or "unknown")
+end
+
+local function resolveAndApplyMapProfile()
+    local mk = getMapKey()
+    gameState.currentMapKey = mk
+    local preset = config.mapProfiles and config.mapProfiles[mk] or nil
+    if preset and PRESET_DEFS[tostring(preset)] then
+        applyPreset(preset)
+        return preset
+    end
+    return nil
+end
+
+local function getSpawnBankForMap(mapKey)
+    local mk = tostring(mapKey or ""):lower()
+    local bank = config.spawnBanks and config.spawnBanks[mk] or nil
+    if type(bank) ~= "table" then return nil end
+    bank.seekers = type(bank.seekers) == "table" and bank.seekers or {}
+    bank.hiders = type(bank.hiders) == "table" and bank.hiders or {}
+    return bank
+end
+
+local function assignSpawnHints()
+    local bank = getSpawnBankForMap(gameState.currentMapKey)
+    if not bank then return end
+    local sIdx, hIdx = 0, 0
+
+    for pid, pdata in pairs(gameState.players or {}) do
+        local list = (pdata.team == "seeker") and bank.seekers or bank.hiders
+        if #list > 0 then
+            if pdata.team == "seeker" then sIdx = sIdx + 1 else hIdx = hIdx + 1 end
+            local idx = (pdata.team == "seeker") and (((sIdx - 1) % #list) + 1) or (((hIdx - 1) % #list) + 1)
+            local sp = list[idx]
+            if type(sp) == "table" and sp.x and sp.y and sp.z then
+                MP.TriggerClientEvent(pid, "PropHunt_SpawnHint", string.format("%s,%0.2f,%0.2f,%0.2f", tostring(pdata.team), tonumber(sp.x) or 0, tonumber(sp.y) or 0, tonumber(sp.z) or 0))
+            end
+        end
+    end
+end
+
+local function ensureEcon(playerId)
+    local e = gameState.economy[playerId]
+    if not e then
+        e = { points = 0, perks = { quickScan = false, stealthTaunt = false } }
+        gameState.economy[playerId] = e
+    end
+    return e
+end
+
+local function grantPoints(playerId, amount)
+    if not config.perksEnabled then return end
+    local e = ensureEcon(playerId)
+    e.points = math.max(0, tonumber(e.points or 0) + tonumber(amount or 0))
+    if e.points >= 30 then e.perks.quickScan = true end
+    if e.points >= 20 then e.perks.stealthTaunt = true end
+end
+
+local function getEffectiveScanCooldown(playerId)
+    local base = tonumber(config.scanCooldown or 0.1) or 0.1
+    local e = gameState.economy[playerId]
+    if e and e.perks and e.perks.quickScan then
+        return math.max(0.04, base * 0.75)
+    end
+    return base
+end
+
+local function getEffectiveTauntCooldown(playerId)
+    local base = tonumber(config.tauntCooldown or 5) or 5
+    local e = gameState.economy[playerId]
+    if e and e.perks and e.perks.stealthTaunt then
+        return math.max(1.5, base * 0.8)
+    end
+    return base
+end
+
 local function computeSeekerCount(playerCount)
     if playerCount <= 1 then return 0 end
 
@@ -142,7 +273,7 @@ end
 -- ============================
 -- GAME STATE
 -- ============================
-local gameState = {
+gameState = {
     active = false,
     phase  = "idle", -- idle | hide | round
     roundId = 0,
@@ -175,7 +306,9 @@ local gameState = {
     roundStartedAt = 0,
     roundTags = 0,
     roundEliminations = 0,
-    roundConversions = 0
+    roundConversions = 0,
+    economy = {}, -- playerID -> {points=0, perks={...}}
+    currentMapKey = "unknown"
 }
 
 local function now()
@@ -368,13 +501,22 @@ local function PropHunt_StopGameInternal(reason)
         broadcast("Game ended.")
     end
 
+    if config.perksEnabled then
+        for pid, pdata in pairs(gameState.players or {}) do
+            if pdata.team == "hider" and pdata.alive and (reason == "timeout" or reason == "hiders") then
+                grantPoints(pid, 5)
+            end
+        end
+    end
+
     local elapsed = math.max(0, math.floor((now() - (gameState.roundStartedAt or now()))))
     local mins = math.floor(elapsed / 60)
     local secs = elapsed % 60
     local winner = ((reason == "timeout" or reason == "hiders") and "HIDERS") or ((reason == "seekers") and "SEEKERS") or "NONE"
     local reasonLabel = tostring(reason or "unknown")
-    broadcast(string.format("Summary: Winner=%s | Reason=%s | Duration=%02d:%02d | Tags=%d | Eliminations=%d | Conversions=%d | AliveHiders=%d",
+    broadcast(string.format("Summary: Winner=%s | Reason=%s | Preset=%s | Duration=%02d:%02d | Tags=%d | Eliminations=%d | Conversions=%d | AliveHiders=%d",
         winner,
+        tostring(config.currentPreset or "custom"),
         reasonLabel,
         mins,
         secs,
@@ -459,14 +601,16 @@ end
 function PropHunt_StartGame(optionalRoundSeconds)
     local playerCount, playerList = countPlayers()
 
-    if playerCount < 2 then
-        print("PropHunt Not enough players to start game (need at least 2)")
-        broadcast("Not enough players to start game (need at least 2)")
+    local minPlayers = (config.allowSoloTest == true) and 1 or 2
+    if playerCount < minPlayers then
+        print("PropHunt Not enough players to start game (need at least " .. tostring(minPlayers) .. ")")
+        broadcast("Not enough players to start game (need at least " .. tostring(minPlayers) .. ")")
         return
     end
 
     -- Reset game state
     gameState.active = true
+    local mapPreset = resolveAndApplyMapProfile()
     gameState.phase = "hide"
     gameState.roundId = (tonumber(gameState.roundId) or 0) + 1
 
@@ -490,6 +634,7 @@ function PropHunt_StartGame(optionalRoundSeconds)
     gameState.roundTags = 0
     gameState.roundEliminations = 0
     gameState.roundConversions = 0
+    gameState.economy = {}
 
     local seekersNeeded = computeSeekerCount(playerCount)
     local seekerSet = pickSeekers(playerList, seekersNeeded)
@@ -498,6 +643,7 @@ function PropHunt_StartGame(optionalRoundSeconds)
     for _, p in ipairs(playerList) do
         local t = seekerSet[p.id] and "seeker" or "hider"
         gameState.players[p.id] = { name = p.name, team = t, alive = true }
+        ensureEcon(p.id)
 
         if t == "seeker" then
             gameState.seekerCount = gameState.seekerCount + 1
@@ -514,11 +660,17 @@ function PropHunt_StartGame(optionalRoundSeconds)
     for playerId, pdata in pairs(gameState.players) do
         MP.TriggerClientEvent(playerId, "PropHunt_GameStart", tostring(gameState.roundId) .. "," .. tostring(pdata.team))
     end
+    assignSpawnHints()
 
     -- E) Assign each hider a prop (server authoritative, client spawns)
     local forcedProp = config.nextRoundForcedProp
 
-    local propCandidates = shuffleProps(config.propPool)
+    local filteredPool = {}
+    for _, p in ipairs(config.propPool or {}) do
+        if propAllowedByTier(p) then filteredPool[#filteredPool + 1] = p end
+    end
+    if #filteredPool == 0 then filteredPool = config.propPool or {"barrels"} end
+    local propCandidates = shuffleProps(filteredPool)
     local propIndex = 0
     local function getNextProp()
         propIndex = propIndex + 1
@@ -553,7 +705,10 @@ function PropHunt_StartGame(optionalRoundSeconds)
         end
     end
 
-    broadcast("Mode: " .. tostring(config.mode) .. " | Hide phase: " .. tostring(gameState.hideTimer) .. " seconds.")
+    if mapPreset then
+        broadcast("Map profile applied: " .. tostring(mapPreset) .. " (" .. tostring(gameState.currentMapKey) .. ")")
+    end
+    broadcast("Mode: " .. tostring(config.mode) .. " | Preset: " .. tostring(config.currentPreset or "custom") .. " | Hide phase: " .. tostring(gameState.hideTimer) .. " seconds.")
 
     -- Push vignette settings to clients
     broadcastSettings()
@@ -561,6 +716,22 @@ function PropHunt_StartGame(optionalRoundSeconds)
     -- Hide phase start + first timer push
     MP.TriggerClientEvent(-1, "PropHunt_HidePhaseStart", tostring(gameState.roundId) .. "," .. tostring(gameState.hideTimer))
     MP.TriggerClientEvent(-1, "PropHunt_HideTimerUpdate", tostring(gameState.roundId) .. "," .. tostring(gameState.hideTimer))
+    if pushHudPulse then pushHudPulse() end
+end
+
+local function pushHudPulse()
+    if not gameState.active then return end
+    local payload = table.concat({
+        tostring(gameState.roundId or 0),
+        tostring(gameState.phase or "idle"),
+        tostring(gameState.hidersAlive or 0),
+        tostring(gameState.hiderCount or 0),
+        tostring(gameState.seekerCount or 0),
+        tostring(gameState.roundTimer or 0),
+        tostring(gameState.hideTimer or 0),
+        tostring(config.currentPreset or "custom")
+    }, ",")
+    MP.TriggerClientEvent(-1, "PropHunt_HudPulse", payload)
 end
 
 -- ============================
@@ -591,6 +762,7 @@ function PropHunt_onTick()
         if gameState.hideTimer < 0 then gameState.hideTimer = 0 end
 
         MP.TriggerClientEvent(-1, "PropHunt_HideTimerUpdate", tostring(gameState.roundId) .. "," .. tostring(gameState.hideTimer))
+        if pushHudPulse then pushHudPulse() end
 
         if gameState.hideTimer <= 0 then
             -- transition to main round
@@ -624,6 +796,7 @@ function PropHunt_onTick()
         end
 
         MP.TriggerClientEvent(-1, "PropHunt_TimerUpdate", tostring(gameState.roundId) .. "," .. tostring(gameState.roundTimer))
+        if pushHudPulse then pushHudPulse() end
 
         return
     end
@@ -676,6 +849,7 @@ local function showStatus(playerId)
     send(playerId, string.format("Timers: hide=%ds round=%ds", tonumber(gameState.hideTimer or 0), tonumber(gameState.roundTimer or 0)))
     send(playerId, string.format("Config: mode=%s seekerMode=%s seekerCount=%s seekerRatio=%s", tostring(config.mode), tostring(config.seekerMode), tostring(config.seekerCount), tostring(config.seekerRatio)))
     send(playerId, string.format("Config: hideTime=%ds roundTime=%ds joinPolicy=%s disguiseMode=%s forcedProp=%s", tonumber(config.hideTime or 60), tonumber(config.roundTime or 300), tostring(config.joinPolicy or "lock_next_round"), tostring(config.disguiseMode or "replace"), tostring(config.nextRoundForcedProp or "random")))
+    send(playerId, string.format("Profiles: preset=%s map=%s propTierMode=%s perks=%s", tostring(config.currentPreset or "custom"), tostring(gameState.currentMapKey or "unknown"), tostring(config.propTierMode or "all"), tostring(config.perksEnabled == true)))
     send(playerId, string.format("Visuals: seekerFade=%.1f seekerIntensity=%.2f hiderFade=%.1f hiderIntensity=%.2f", tonumber(config.seekerFadeDist or 120), tonumber(config.seekerFilterIntensity or 1), tonumber(config.hiderFadeDist or 120), tonumber(config.hiderFilterIntensity or 0.35)))
     send(playerId, string.format("Stability: forceGhostOffOnRestore=%s cleanupSweepSeconds=%s spawnswapRetryCount=%s seekerTabPrevention=%s", tostring(config.forceGhostOffOnRestore ~= false), tostring(tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15), tostring(tonumber(config.spawnswapRetryCount or 1) or 1), tostring(config.seekerTabPrevention ~= false)))
 end
@@ -685,6 +859,7 @@ local function showHelp(playerId)
     send(playerId, "  /ph start [minutes] - Start game")
     send(playerId, "  /ph stop - Stop game")
     send(playerId, "  /ph status - Round + config status")
+    send(playerId, "  /ph points [playerID] - economy/perk status")
     send(playerId, "  /ph players - List player IDs")
     send(playerId, "  /ph seeker <playerID> - Set next seeker (next round)")
     send(playerId, "  /ph seekers <id1> <id2> ... - Set seekers for next round (multiple)")
@@ -705,6 +880,10 @@ local function showHelp(playerId)
     send(playerId, "  /ph set seekerfilterintensity <0-1> - (Seekers) vignette strength")
     send(playerId, "  /ph set hiderfadedist <meters> - (Hiders) proximity vignette range")
     send(playerId, "  /ph set hiderfilterintensity <0-1> - (Hiders) vignette strength")
+    send(playerId, "  /ph preset casual|ranked|chaos")
+    send(playerId, "  /ph mapprofile <mapKey> <casual|ranked|chaos>")
+    send(playerId, "  /ph spawnbank add <mapKey> <seeker|hider> <x> <y> <z>")
+    send(playerId, "  /ph spawnbank list <mapKey> | /ph spawnbank clear <mapKey>")
     send(playerId, "  /ph props random - Random prop per hider")
     send(playerId, "  /ph props <propKey> - Force a prop for NEXT round only")
     send(playerId, "(Old style also works: /phstart, /phstop, etc)")
@@ -731,6 +910,7 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             stop = "/phstop",
             help = "/phhelp",
             status = "/phstatus",
+            points = "/phpoints",
             players = "/phplayers",
             seeker = "/phseeker",
             seekers = "/phseekers",
@@ -738,6 +918,9 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             seekersname = "/phseekersname",
             set = "/phset",
             props = "/phprops",
+            preset = "/phpreset",
+            mapprofile = "/phmapprofile",
+            spawnbank = "/phspawnbank",
         }
 
         if map[sub] then
@@ -750,7 +933,7 @@ function PropHunt_onChatMessage(playerId, playerName, message)
         msg == "/phstop" or
         msg:match("^/setseeker%s") or msg:match("^/phseeker%s") or
         msg:match("^/phseekers%s") or msg:match("^/phseekername%s") or msg:match("^/phseekersname%s") or
-        msg:match("^/phset%s") or msg:match("^/phprops%s")
+        msg:match("^/phset%s") or msg:match("^/phprops%s") or msg:match("^/phpreset%s") or msg:match("^/phmapprofile%s") or msg:match("^/phspawnbank%s")
     )
     if config.adminAclEnabled == true and mutatingCmd and not isAdmin(playerId, playerName) then
         send(playerId, "Admin only command")
@@ -876,6 +1059,74 @@ function PropHunt_onChatMessage(playerId, playerName, message)
     elseif msg == "/phstatus" then
         showStatus(playerId)
         return 1
+    elseif msg == "/phpoints" or msg:match("^/phpoints%s") then
+        local words = parseWords(msg)
+        local qid = tonumber(words[2] or "") or playerId
+        local e = gameState.economy[qid]
+        if not e then
+            send(playerId, "No economy data for player " .. tostring(qid))
+            return 1
+        end
+        send(playerId, string.format("points[%s]=%d perks{quickScan=%s, stealthTaunt=%s}", tostring(qid), tonumber(e.points or 0), tostring(e.perks and e.perks.quickScan == true), tostring(e.perks and e.perks.stealthTaunt == true)))
+        return 1
+    elseif msg:match("^/phpreset%s") then
+        local words = parseWords(msg)
+        local preset = tostring(words[2] or ""):lower()
+        if preset ~= "casual" and preset ~= "ranked" and preset ~= "chaos" then
+            send(playerId, "Usage: /ph preset casual|ranked|chaos")
+            return 1
+        end
+        applyPreset(preset)
+        broadcast("Preset set to " .. tostring(preset) .. " (propTierMode=" .. tostring(config.propTierMode) .. ")")
+        broadcastSettings()
+        return 1
+    elseif msg:match("^/phmapprofile%s") then
+        local words = parseWords(msg)
+        local mapKey = tostring(words[2] or ""):lower()
+        local preset = tostring(words[3] or ""):lower()
+        if mapKey == "" or (preset ~= "casual" and preset ~= "ranked" and preset ~= "chaos") then
+            send(playerId, "Usage: /ph mapprofile <mapKey> <casual|ranked|chaos>")
+            return 1
+        end
+        config.mapProfiles[mapKey] = preset
+        send(playerId, "Map profile set: " .. mapKey .. " -> " .. preset)
+        return 1
+    elseif msg:match("^/phspawnbank%s") then
+        local words = parseWords(msg)
+        local sub = tostring(words[2] or ""):lower()
+        local mapKey = tostring(words[3] or ""):lower()
+        if mapKey == "" then
+            send(playerId, "Usage: /ph spawnbank add|list|clear <mapKey> ...")
+            return 1
+        end
+
+        config.spawnBanks[mapKey] = config.spawnBanks[mapKey] or { seekers = {}, hiders = {} }
+        local bank = config.spawnBanks[mapKey]
+        bank.seekers = bank.seekers or {}
+        bank.hiders = bank.hiders or {}
+
+        if sub == "clear" then
+            config.spawnBanks[mapKey] = { seekers = {}, hiders = {} }
+            send(playerId, "Spawn bank cleared for " .. mapKey)
+            return 1
+        elseif sub == "list" then
+            send(playerId, string.format("Spawn bank %s: seekers=%d hiders=%d", mapKey, #bank.seekers, #bank.hiders))
+            return 1
+        elseif sub == "add" then
+            local team = tostring(words[4] or ""):lower()
+            local x, y, z = tonumber(words[5]), tonumber(words[6]), tonumber(words[7])
+            if (team ~= "seeker" and team ~= "hider") or not x or not y or not z then
+                send(playerId, "Usage: /ph spawnbank add <mapKey> <seeker|hider> <x> <y> <z>")
+                return 1
+            end
+            local key = (team == "seeker") and "seekers" or "hiders"
+            bank[key][#bank[key] + 1] = { x = x, y = y, z = z }
+            send(playerId, string.format("Spawn added: %s[%d] on %s", key, #bank[key], mapKey))
+            return 1
+        else
+            send(playerId, "Usage: /ph spawnbank add|list|clear <mapKey> ...")
+            return 1
+        end
     elseif msg == "/phhelp" then
         showHelp(playerId)
         return 1
@@ -1065,6 +1316,10 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             send(playerId, "Unknown prop key: " .. tostring(arg))
             return 1
         end
+        if not propAllowedByTier(arg) then
+            send(playerId, "Prop is blocked by current propTierMode (" .. tostring(config.propTierMode or "all") .. ")")
+            return 1
+        end
 
         -- Force for NEXT ROUND ONLY
         config.nextRoundForcedProp = arg
@@ -1212,9 +1467,14 @@ function PropHunt_onTauntRequest(playerId, data)
         if config.debug then print("PropHunt TauntRequest rejected: player not in game") end
         return
     end
-    local cd, remaining = isOnCooldown(gameState.lastTaunt, playerId, config.tauntCooldown)
+    local tauntCd = getEffectiveTauntCooldown(playerId)
+    local cd, remaining = isOnCooldown(gameState.lastTaunt, playerId, tauntCd)
     if cd then
         return
+    end
+
+    if team(playerId) == "hider" then
+        grantPoints(playerId, 1)
     end
 
     MP.TriggerClientEvent(-1, "PropHunt_Taunt", payload)
@@ -1329,6 +1589,8 @@ function PropHunt_onTagRequest(playerId, data)
     gameState.lastTaggedTarget[playerId] = { id = targetId, t = now(), token = reqToken }
     gameState.roundTags = (gameState.roundTags or 0) + 1
 
+    grantPoints(playerId, 3) -- seeker successful tag bonus
+
     local seekerName = gameState.players[playerId].name or (MP.GetPlayerName(playerId) or tostring(playerId))
     local hiderName  = gameState.players[targetId].name or (MP.GetPlayerName(targetId) or tostring(targetId))
 
@@ -1343,6 +1605,7 @@ function PropHunt_onTagRequest(playerId, data)
 
         -- Tell that player their team changed
         MP.TriggerClientEvent(targetId, "PropHunt_TeamUpdate", tostring(gameState.roundId) .. ",seeker")
+        MP.TriggerClientEvent(targetId, "PropHunt_KillcamPulse", tostring(gameState.roundId) .. "," .. tostring(seekerName) .. "," .. tostring(hiderName))
 
         -- Update team lists
         sendHiderListToSeekers()
@@ -1362,6 +1625,7 @@ function PropHunt_onTagRequest(playerId, data)
 
         -- notify clients for UI
         MP.TriggerClientEvent(-1, "PropHunt_PlayerEliminated", tostring(targetId) .. "," .. tostring(hiderName))
+        MP.TriggerClientEvent(targetId, "PropHunt_KillcamPulse", tostring(gameState.roundId) .. "," .. tostring(seekerName) .. "," .. tostring(hiderName))
 
         clearTempPropsForPlayer(targetId, "tagged")
 
@@ -1424,10 +1688,11 @@ function PropHunt_onScanRequest(playerId, data)
     if not isInGame(playerId) or not isAlive(playerId) then return end
     if team(playerId) ~= "seeker" then return end
 
-    local cd, remaining = isOnCooldown(gameState.lastScan, playerId, config.scanCooldown)
+    local scanCd = getEffectiveScanCooldown(playerId)
+    local cd, remaining = isOnCooldown(gameState.lastScan, playerId, scanCd)
     if cd then
-        -- Give a lightweight hint so it doesn't feel "broken"
         if remaining and remaining > 0.2 then
+            MP.TriggerClientEvent(playerId, "PropHunt_CooldownHint", "scan," .. string.format("%.2f", remaining))
             send(playerId, string.format("Scan cooldown: %.1fs", remaining))
         end
         return

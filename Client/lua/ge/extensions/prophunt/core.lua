@@ -74,10 +74,14 @@ local hiderFilterIntensity = 0.35
 local disguiseMode = "replace"
 local forceGhostOffOnRestore = true
 local spawnswapRetryCount = 2
+local spawnswapDisabledRound = nil
+local preSpawnAttemptedRound = nil
 local cleanupSweepSeconds = 15
 local seekerTabPrevention = true
 local seekerLockedVehId = nil
 local lastSeekerTabWarnAt = 0
+local lastHudPulseMsgAt = 0
+local lastHudPulseKey = ""
 local postRoundCleanupUntil = 0
 local lastPostRoundCleanupSweepAt = 0
 local pendingHardDelete = {} -- serverVehicleString -> dueTime
@@ -119,6 +123,10 @@ local spawnAndAttachProp
 local preSpawnIfNeeded
 local onTeamUpdate
 local onSettings
+local onHudPulse
+local onKillcamPulse
+local onCooldownHint
+local onSpawnHint
 local onTempPropClear
 local cleanupTempSpawnSwapProps
 local clearTempPropByServerString
@@ -209,6 +217,10 @@ local function onExtensionLoaded()
         onScanPulse = onScanPulse,
         onTeamUpdate = onTeamUpdate,
         onSettings = onSettings,
+        onHudPulse = onHudPulse,
+        onKillcamPulse = onKillcamPulse,
+        onCooldownHint = onCooldownHint,
+        onSpawnHint = onSpawnHint,
         onTempPropClear = onTempPropClear,
     })
 
@@ -848,6 +860,8 @@ local function resetRoundState(roundId)
     disguiseInProgress = false
     lastStateRequestAt = 0
     propStateRequestedRound = nil
+    spawnswapDisabledRound = nil
+    preSpawnAttemptedRound = nil
 end
 
 local function logCommandUsage(cmd, details)
@@ -1073,6 +1087,8 @@ end
 -- Best-effort vehicle ids used by elimination/end-round revert paths.
 local originalVehId = nil
 local propVehId = nil
+local preDisguiseModelKey = nil
+local preDisguiseConfig = nil
 
 spawnAndAttachProp = function(propName)
     disguiseMod.spawnAndAttachProp({
@@ -1095,22 +1111,51 @@ spawnAndAttachProp = function(propName)
         getDisguiseMode = function() return disguiseMode end,
         getForceGhostOffOnRestore = function() return forceGhostOffOnRestore end,
         getSpawnswapRetryCount = function() return spawnswapRetryCount end,
+        isSpawnswapDisabledForRound = function()
+            return currentRoundId and spawnswapDisabledRound == currentRoundId
+        end,
+        disableSpawnswapForRound = function(reason)
+            if currentRoundId then
+                spawnswapDisabledRound = currentRoundId
+                print("[PH] spawnswap disabled for round " .. tostring(currentRoundId) .. " reason=" .. tostring(reason))
+            end
+        end,
         getCurrentRoundId = function() return currentRoundId end,
         getPlayerTeam = function() return playerTeam end,
         getOriginalVehId = function() return originalVehId end,
         setOriginalVehId = function(v) originalVehId = v end,
         getPropVehId = function() return propVehId end,
         setPropVehId = function(v) propVehId = v end,
+        getPreDisguiseModelKey = function() return preDisguiseModelKey end,
+        setPreDisguiseModelKey = function(v) preDisguiseModelKey = v end,
+        getPreDisguiseConfig = function() return preDisguiseConfig end,
+        setPreDisguiseConfig = function(v) preDisguiseConfig = v end,
     }, propName)
 end
 
 preSpawnIfNeeded = function()
     if playerTeam ~= "hider" then return end
     if not assignedPropName or assignedPropName == "" then return end
+    if currentRoundId and spawnswapDisabledRound == currentRoundId then return end
     disguiseMod.preSpawnProp({
         getDisguiseMode = function() return disguiseMode end,
         getForceGhostOffOnRestore = function() return forceGhostOffOnRestore end,
         getSpawnswapRetryCount = function() return spawnswapRetryCount end,
+        isPreSpawnAttemptedThisRound = function()
+            return currentRoundId and preSpawnAttemptedRound == currentRoundId
+        end,
+        markPreSpawnAttemptedThisRound = function()
+            if currentRoundId then preSpawnAttemptedRound = currentRoundId end
+        end,
+        isSpawnswapDisabledForRound = function()
+            return currentRoundId and spawnswapDisabledRound == currentRoundId
+        end,
+        disableSpawnswapForRound = function(reason)
+            if currentRoundId then
+                spawnswapDisabledRound = currentRoundId
+                print("[PH] pre-spawn disabled for round " .. tostring(currentRoundId) .. " reason=" .. tostring(reason))
+            end
+        end,
         getCurrentRoundId = function() return currentRoundId end,
         getPlayerTeam = function() return playerTeam end,
         getPropVehId = function() return propVehId end,
@@ -1378,8 +1423,23 @@ onPlayerEliminated = function(data)
                     beamMessage({ msg = "You were found! Back to your car (eliminated).", ttl = 4, icon = 'directions_car' })
 
                 else
-                    -- With spawn+deactivate disguises, we should always be able to go back to the original vehicle.
-                    print("WARN: No original vehicle captured; cannot revert")
+                    -- Replace-mode fallback: rebuild original vehicle from captured model/config.
+                    if preDisguiseModelKey and core_vehicles and core_vehicles.replaceVehicle then
+                        local okRep, errRep = pcall(function()
+                            if preDisguiseConfig and preDisguiseConfig ~= '' then
+                                core_vehicles.replaceVehicle(preDisguiseModelKey, { config = preDisguiseConfig })
+                            else
+                                core_vehicles.replaceVehicle(preDisguiseModelKey, {})
+                            end
+                        end)
+                        if okRep then
+                            beamMessage({ msg = "You were found! Reverting to car.", ttl = 4, icon = 'directions_car' })
+                        else
+                            print("WARN: replace fallback revert failed: " .. tostring(errRep))
+                        end
+                    else
+                        print("WARN: No original vehicle captured; cannot revert")
+                    end
                 end
             end
         end
@@ -1419,7 +1479,20 @@ onRoundEnd = function(data)
             end
         end)
         pcall(function() be:enterVehicle(0, ov) end)
+    elseif preDisguiseModelKey and core_vehicles and core_vehicles.replaceVehicle then
+        -- Replace-mode fallback at round end
+        local okRep, errRep = pcall(function()
+            if preDisguiseConfig and preDisguiseConfig ~= '' then
+                core_vehicles.replaceVehicle(preDisguiseModelKey, { config = preDisguiseConfig })
+            else
+                core_vehicles.replaceVehicle(preDisguiseModelKey, {})
+            end
+        end)
+        if not okRep then
+            print("WARN: round-end replace fallback failed: " .. tostring(errRep))
+        end
     end
+
     if propVehId and be:getObjectByID(propVehId) then
         local pv = be:getObjectByID(propVehId)
         pcall(function() pv:setActive(0) end)
@@ -1470,6 +1543,8 @@ onRoundEnd = function(data)
     assignedPropName = nil
     originalVehId = nil
     propVehId = nil
+    preDisguiseModelKey = nil
+    preDisguiseConfig = nil
 end
 
 -- --- CHAT COMMANDS ---
@@ -1649,6 +1724,58 @@ onSettings = function(data)
     end
 
     preSpawnIfNeeded()
+end
+
+onHudPulse = function(data)
+    local parts = {}
+    for part in string.gmatch(tostring(data or ""), "[^,]+") do table.insert(parts, part) end
+    if #parts < 8 then return end
+
+    local rid = tonumber(parts[1])
+    local phase = tostring(parts[2] or "idle")
+    local alive = tonumber(parts[3] or 0) or 0
+    local hiders = tonumber(parts[4] or 0) or 0
+    local seekers = tonumber(parts[5] or 0) or 0
+    local rTimer = tonumber(parts[6] or 0) or 0
+    local hTimer = tonumber(parts[7] or 0) or 0
+    local preset = tostring(parts[8] or "custom")
+
+    if rid then currentRoundId = rid end
+
+    local objective = (playerTeam == "seeker") and "Find and tag hiders" or "Survive and waste time"
+    local msg = string.format("%s | H:%d/%d S:%d | %s | preset=%s", string.upper(phase), alive, hiders, seekers, objective, preset)
+    local key = msg .. "|" .. tostring(rTimer) .. "|" .. tostring(hTimer)
+
+    local t = os.clock()
+    if key ~= lastHudPulseKey and (t - lastHudPulseMsgAt) > 6 then
+        lastHudPulseKey = key
+        lastHudPulseMsgAt = t
+        beamMessage({ msg = msg, ttl = 2.2, icon = 'flag' })
+    end
+end
+
+onKillcamPulse = function(data)
+    local rid, seekerName, hiderName = tostring(data or ""):match("^([^,]+),([^,]+),(.+)$")
+    if rid and tonumber(rid) then currentRoundId = tonumber(rid) end
+    if seekerName and seekerName ~= "" then
+        beamMessage({ msg = "Tagged by " .. tostring(seekerName) .. " (" .. tostring(hiderName or "you") .. ")", ttl = 3.5, icon = 'movie' })
+    end
+end
+
+onCooldownHint = function(data)
+    local kind, rem = tostring(data or ""):match("^([^,]+),([^,]+)$")
+    if kind == "scan" then
+        local n = tonumber(rem or "0") or 0
+        local pct = math.max(0, math.min(1, 1 - (n / 2.0)))
+        local ring = (pct > 0.80 and "◉") or (pct > 0.60 and "◔") or (pct > 0.35 and "◑") or (pct > 0.10 and "◕") or "○"
+        beamMessage({ msg = string.format("SCAN %s %.1fs", ring, n), ttl = 1.0, icon = 'timer' })
+    end
+end
+
+onSpawnHint = function(data)
+    local team, sx, sy, sz = tostring(data or ""):match("^([^,]+),([^,]+),([^,]+),([^,]+)$")
+    if not team then return end
+    beamMessage({ msg = string.format("%s spawn hint: %s, %s, %s", tostring(team), tostring(sx), tostring(sy), tostring(sz)), ttl = 4.0, icon = 'place' })
 end
 
 clearTempPropByServerString = function(targetServerVeh)
@@ -1900,7 +2027,9 @@ local function onSeekerCollision(otherVehId)
     end
 
     if TriggerServerEvent then
-        TriggerServerEvent("PropHunt_onContactReceive", tostring(targetPlayerId))
+        local rid = tonumber(currentRoundId or 0) or 0
+        local token = makeTagToken(targetPlayerId)
+        TriggerServerEvent("PropHunt_onContactReceive", tostring(rid) .. "|" .. tostring(targetPlayerId) .. "|" .. token)
         print("DEBUG: Auto-tag collision => contact on player " .. tostring(targetPlayerId))
     end
 end
@@ -1949,6 +2078,10 @@ local TAG_CONTACT_COOLDOWN = 0.25
 local TAG_OBB_ENABLED = true
 local TAG_OBB_DEBUG = true   -- set false once confirmed
 local lastObbDebugAt = 0
+
+local function makeTagToken(remotePid)
+    return tostring(math.floor((os.clock() or 0) * 1000)) .. "-" .. tostring(remotePid or 0) .. "-" .. tostring(math.random(100000, 999999))
+end
 
 local function sendTagContact(remoteVehID, localVehID)
     if not gameActive or hidePhase then return end
@@ -2034,7 +2167,9 @@ local function sendTagContact(remoteVehID, localVehID)
             local remotePid = tonumber(string.match(tostring(serverVehID), "(%d+)%-%d+"))
             if remotePid and TriggerServerEvent then
                 -- Outbreak-style contact event
-                TriggerServerEvent("PropHunt_onContactReceive", tostring(remotePid))
+                local rid = tonumber(currentRoundId or 0) or 0
+                local token = makeTagToken(remotePid)
+                TriggerServerEvent("PropHunt_onContactReceive", tostring(rid) .. "|" .. tostring(remotePid) .. "|" .. token)
                 return
             end
         end

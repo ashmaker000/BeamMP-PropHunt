@@ -69,17 +69,23 @@ function M.handleChatMessage(msg, ctx)
     end
 
     if TriggerServerEvent then
-      TriggerServerEvent("PropHunt_TagRequest", tostring(targetId))
+      local rid = 0
+      if ctx.getCurrentRoundId then
+        local cur = tonumber(ctx.getCurrentRoundId())
+        if cur then rid = cur end
+      end
+      local token = tostring(math.floor((os.clock() or 0) * 1000)) .. "-" .. tostring(math.random(100000, 999999))
+      TriggerServerEvent("PropHunt_TagRequest", tostring(rid) .. "|" .. tostring(targetId) .. "|" .. token)
       ctx.beamMessage({ msg = "Tag request sent for player " .. tostring(targetId), ttl = 2, icon = 'near_me' })
     else
       ctx.beamMessage({ msg = "Error: TriggerServerEvent not available", ttl = 3, icon = 'error' })
     end
   elseif cmd == "/phhelp" then
     ctx.beamMessage({
-      msg = "PropHunt Commands:\n" ..
-            "/phconfig <setting> <value> - Configure client distances\n" ..
+      msg = "PropHunt Commands (canonical):\n" ..
+            "/ph config <setting> <value> - Configure client distances\n" ..
             "Settings: taunt_dist, proximity, proximity_dist, hiderfadedist, hiderfilterintensity\n" ..
-            "/phtag <playerId> - (seekers) tag a hider (temporary until automatic tagging)",
+            "/phtag <playerId> - (seekers) send tag request",
       ttl = 9,
       icon = 'help'
     })

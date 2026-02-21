@@ -6,6 +6,7 @@ M.defaults = {
 
   roundTime = 300,
   hideTime = 60,
+  allowSoloTest = false,
 
   -- seeker selection
   seekerMode = "fixed", -- fixed | ratio
@@ -55,6 +56,30 @@ M.defaults = {
   requireTagCorroboration = true,
   requireMutualContact = false,
   tagCorroborationWindow = 0.35,
+
+  -- gameplay profile
+  currentPreset = "casual", -- casual | ranked | chaos
+
+  -- map-aware profile binding (mapKey -> preset)
+  mapProfiles = {
+    west_coast_usa = "ranked",
+    utah = "casual"
+  },
+
+  -- map-aware spawn banks (optional hints; can be used by client scripts/tools)
+  -- spawnBanks = {
+  --   west_coast_usa = {
+  --     seekers = { {x=0,y=0,z=0}, {x=10,y=0,z=0} },
+  --     hiders  = { {x=100,y=20,z=0}, {x=120,y=20,z=0} }
+  --   }
+  -- }
+  spawnBanks = {},
+
+  -- prop tier balancing
+  propTierMode = "all", -- all | ranked | chaos
+
+  -- economy / perks
+  perksEnabled = true,
 
   -- Prop pool (official internal names)
   propPool = {
