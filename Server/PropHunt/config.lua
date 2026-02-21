@@ -39,6 +39,23 @@ M.defaults = {
   -- Next-round-only forced prop (nil => random)
   nextRoundForcedProp = nil,
 
+  -- admin ACL (string IDs / exact names)
+  -- default OFF for backwards compatibility
+  adminAclEnabled = false,
+  adminIds = {},
+  adminNames = {},
+
+  -- anti-spam hard floors (seconds)
+  minEventGapTempProp = 0.05,
+  minEventGapTag = 0.05,
+  minEventGapTaunt = 0.05,
+  minEventGapScan = 0.05,
+
+  -- tag corroboration (anti-spoof)
+  requireTagCorroboration = true,
+  requireMutualContact = false,
+  tagCorroborationWindow = 0.35,
+
   -- Prop pool (official internal names)
   propPool = {
     "anticut", "barrels", "ball", "barrier", "barrier_plastic", "blockwall", "bollard",

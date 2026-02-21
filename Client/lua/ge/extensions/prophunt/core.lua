@@ -1003,7 +1003,7 @@ onGameEnd = function(data)
     end
 
     if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
-    postRoundCleanupUntil = os.clock() + 5.0
+    postRoundCleanupUntil = os.clock() + 10.0
     lastPostRoundCleanupSweepAt = 0
 
     local msg = "Game Over!"
@@ -1464,7 +1464,7 @@ onRoundEnd = function(data)
 
     if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
     pulseNicknameRenderer()
-    postRoundCleanupUntil = os.clock() + 5.0
+    postRoundCleanupUntil = os.clock() + 10.0
     lastPostRoundCleanupSweepAt = 0
 
     assignedPropName = nil
@@ -1654,31 +1654,45 @@ end
 clearTempPropByServerString = function(targetServerVeh)
     if not targetServerVeh or targetServerVeh == "" then return end
 
-    local _, idxStr = tostring(targetServerVeh):match("^(%d+)%-(%d+)$")
+    local pidStr, idxStr = tostring(targetServerVeh):match("^(%d+)%-(%d+)$")
     local idx = tonumber(idxStr)
-    if idx and idx > 0 then
-        queueHardDelete(targetServerVeh, 2.5)
-    end
+
+    -- Global default: destructive clears are always allowed post-round.
+    local allowDestructiveGlobal = (gameActive ~= true)
 
     -- 1) Best-effort remove from BeamMP vehicle registry (prevents stale nametags)
-    if MPVehicleGE and MPVehicleGE.onServerVehicleRemoved then
-        pcall(function() MPVehicleGE.onServerVehicleRemoved(targetServerVeh) end)
-    end
+    -- Only run when destructive clear is allowed for this target.
+    local shouldNotifyServerVehicleRemoved = false
 
-    -- 2) Also sweep any matching local object and hide/deactivate it
+    -- 2) Sweep matching vehicle data and scrub display metadata.
     if MPVehicleGE and MPVehicleGE.getVehicles then
         local list = MPVehicleGE.getVehicles() or {}
-        for k, veh in pairs(list) do
+        for _, veh in pairs(list) do
             if tostring(veh.serverVehicleString or "") == targetServerVeh then
                 local obj = be:getObjectByID(veh.gameVehicleID)
-                if obj then
-                    -- ghost toggle removed
+                local playerVeh = be:getPlayerVehicle(0)
+                local playerVehId = playerVeh and playerVeh:getID() or nil
+
+                -- In active rounds, allow destructive clear ONLY for temp spawn-swap entries (idx > 0)
+                -- that are not currently the player's controlled vehicle.
+                local allowDestructive = allowDestructiveGlobal
+                if not allowDestructive then
+                    local isTempEntry = (idx and idx > 0)
+                    local isPlayerControlled = (playerVehId and veh.gameVehicleID and tonumber(veh.gameVehicleID) == tonumber(playerVehId))
+                    allowDestructive = (isTempEntry == true and isPlayerControlled ~= true)
+                end
+
+                if allowDestructive and obj then
                     pcall(function() obj:setActive(0) end)
                     pcall(function()
                         if core_vehicleBridge and core_vehicleBridge.executeAction then
                             core_vehicleBridge.executeAction(obj, 'setFreeze', true)
                         end
                     end)
+                    if idx and idx > 0 then
+                        queueHardDelete(targetServerVeh, 2.5)
+                    end
+                    shouldNotifyServerVehicleRemoved = true
                 end
 
                 -- Scrub any remaining display-name data to prevent lingering nametags.
@@ -1691,7 +1705,6 @@ clearTempPropByServerString = function(targetServerVeh)
                     if veh.clearCustomRole then veh:clearCustomRole() end
                 end)
 
-                -- Nuke additional tag fields used by nickname renderer.
                 veh.shortname = ""
                 veh.nickPrefixes = {}
                 veh.nickSuffixes = {}
@@ -1700,11 +1713,12 @@ clearTempPropByServerString = function(targetServerVeh)
                     veh.role.tag = ""
                     veh.role.shorttag = ""
                 end
-
-                -- Do not hard-delete MPVehicleGE entry here; it can race trailer/coupler events.
-                -- Keep soft scrub + onServerVehicleRemoved path only.
             end
         end
+    end
+
+    if shouldNotifyServerVehicleRemoved and MPVehicleGE and MPVehicleGE.onServerVehicleRemoved then
+        pcall(function() MPVehicleGE.onServerVehicleRemoved(targetServerVeh) end)
     end
 end
 
@@ -1754,6 +1768,10 @@ onTeamUpdate = function(data)
 end
 
 cleanupTempSpawnSwapProps = function()
+    -- Safety: never run owner-wide sweep while round is active.
+    -- This sweep is intended for post-round stale cleanup only.
+    if gameActive then return end
+
     local function doSweep()
         if not MPVehicleGE or not MPVehicleGE.getVehicles then return end
 
@@ -1769,23 +1787,12 @@ cleanupTempSpawnSwapProps = function()
             end
         end
 
-        -- Keep exactly one vehicle per owner (prefer idx=0); clear the rest.
+        -- Round-end rule: always clear temp spawn-swap entries (idx > 0).
+        -- Keep owner base vehicles (idx == 0) only.
         local changed = false
         for _, list in pairs(byOwner) do
-            local keepSvs = nil
-            local bestIdx = math.huge
             for _, v in ipairs(list) do
-                if v.idx == 0 then
-                    keepSvs = v.svs
-                    bestIdx = 0
-                    break
-                elseif v.idx < bestIdx then
-                    bestIdx = v.idx
-                    keepSvs = v.svs
-                end
-            end
-            for _, v in ipairs(list) do
-                if v.svs ~= keepSvs then
+                if (tonumber(v.idx) or -1) > 0 then
                     clearTempPropByServerString(v.svs)
                     changed = true
                 end

@@ -48,7 +48,17 @@ do
             hiderFilterIntensity = 0.35,
             joinPolicy = "lock_next_round",
             disguiseMode = "replace",
-            nextRoundForcedProp = nil
+            nextRoundForcedProp = nil,
+            adminAclEnabled = false,
+            adminIds = {},
+            adminNames = {},
+            minEventGapTempProp = 0.05,
+            minEventGapTag = 0.05,
+            minEventGapTaunt = 0.05,
+            minEventGapScan = 0.05,
+            requireTagCorroboration = true,
+            requireMutualContact = false,
+            tagCorroborationWindow = 0.35
         }
     end
 end
@@ -58,6 +68,16 @@ if config.forceGhostOffOnRestore == nil then config.forceGhostOffOnRestore = tru
 if config.cleanupSweepSeconds == nil then config.cleanupSweepSeconds = tonumber(config.tempPropSweepSeconds or 15) or 15 end
 if config.spawnswapRetryCount == nil then config.spawnswapRetryCount = 2 end
 if config.seekerTabPrevention == nil then config.seekerTabPrevention = true end
+if config.adminAclEnabled == nil then config.adminAclEnabled = false end
+if config.adminIds == nil then config.adminIds = {} end
+if config.adminNames == nil then config.adminNames = {} end
+if config.minEventGapTempProp == nil then config.minEventGapTempProp = 0.05 end
+if config.minEventGapTag == nil then config.minEventGapTag = 0.05 end
+if config.minEventGapTaunt == nil then config.minEventGapTaunt = 0.05 end
+if config.minEventGapScan == nil then config.minEventGapScan = 0.05 end
+if config.requireTagCorroboration == nil then config.requireTagCorroboration = true end
+if config.requireMutualContact == nil then config.requireMutualContact = false end
+if config.tagCorroborationWindow == nil then config.tagCorroborationWindow = 0.35 end
 
 local function isValidProp(key)
     for _, v in ipairs(config.propPool) do
@@ -144,6 +164,11 @@ local gameState = {
     lastFlash = {},
     lastTag   = {},
     lastScan  = {},
+    lastTauntEvent = {},
+    lastTagEvent = {},
+    lastScanEvent = {},
+    lastTempPropEvent = {},
+    recentContactClaims = {}, -- seekerId -> targetId -> { t=now(), roundId=n, token=string|nil }
     tempProps = {}, -- playerID -> { [serverVehicleString]=true } for temporary spawned props
     lastTempPropSweepAt = 0,
 
@@ -164,6 +189,24 @@ end
 
 local function send(playerId, msg)
     MP.SendChatMessage(playerId, "PropHunt " .. msg)
+end
+
+local function toSet(list)
+    local s = {}
+    if type(list) ~= "table" then return s end
+    for _, v in ipairs(list) do s[tostring(v)] = true end
+    return s
+end
+
+local adminIds = toSet(config.adminIds)
+local adminNames = toSet(config.adminNames)
+
+local function isAdmin(playerId, playerName)
+    local sid = tostring(playerId)
+    if sid == "0" or sid == "-1" then return true end
+    if adminIds[sid] then return true end
+    if playerName and adminNames[tostring(playerName)] then return true end
+    return false
 end
 
 local function isInGame(playerId)
@@ -702,6 +745,18 @@ function PropHunt_onChatMessage(playerId, playerName, message)
         end
     end
 
+    local mutatingCmd = (
+        msg == "/phstart" or msg:match("^/phstart%s") or
+        msg == "/phstop" or
+        msg:match("^/setseeker%s") or msg:match("^/phseeker%s") or
+        msg:match("^/phseekers%s") or msg:match("^/phseekername%s") or msg:match("^/phseekersname%s") or
+        msg:match("^/phset%s") or msg:match("^/phprops%s")
+    )
+    if config.adminAclEnabled == true and mutatingCmd and not isAdmin(playerId, playerName) then
+        send(playerId, "Admin only command")
+        return 1
+    end
+
     if msg == "/phstart" or msg:match("^/phstart%s") then
         local words = parseWords(msg)
         local minutes = tonumber(words[2])
@@ -1063,8 +1118,10 @@ MP.RegisterEvent("PropHunt_requestState", "PropHunt_requestState")
 
 -- Temporary spawned prop registration (for cleanup on all clients)
 function PropHunt_tempPropSet(playerId, data)
+    if isEventFlood(gameState.lastTempPropEvent, playerId, config.minEventGapTempProp) then return end
     local raw = tostring(data or "")
     if raw == "" then return end
+    if #raw > 128 then return end
 
     local ridStr, sv = raw:match("^(%d+)%|(.+)$")
     local rid = tonumber(ridStr)
@@ -1097,6 +1154,38 @@ local function isOnCooldown(map, playerId, cooldownSeconds)
     return false, 0
 end
 
+local function isEventFlood(map, playerId, minGap)
+    local t = now()
+    local last = map[playerId] or -1e9
+    if (t - last) < (tonumber(minGap) or 0.05) then
+        return true
+    end
+    map[playerId] = t
+    return false
+end
+
+local function recordContactClaim(fromPlayerId, targetPlayerId, roundId, token)
+    if not fromPlayerId or not targetPlayerId then return end
+    gameState.recentContactClaims[fromPlayerId] = gameState.recentContactClaims[fromPlayerId] or {}
+    gameState.recentContactClaims[fromPlayerId][targetPlayerId] = {
+        t = now(),
+        roundId = tonumber(roundId) or tonumber(gameState.roundId or -1),
+        token = token and tostring(token) or nil,
+    }
+end
+
+local function hasRecentContactClaim(fromPlayerId, targetPlayerId, roundId)
+    local byFrom = gameState.recentContactClaims[fromPlayerId]
+    if not byFrom then return false end
+    local claim = byFrom[targetPlayerId]
+    if not claim then return false end
+
+    local maxAge = tonumber(config.tagCorroborationWindow or 0.35) or 0.35
+    if (now() - (claim.t or -1e9)) > maxAge then return false end
+    if tonumber(claim.roundId or -1) ~= tonumber(roundId or -2) then return false end
+    return true
+end
+
 -- ============================
 -- TAUNT EVENT
 -- ============================
@@ -1109,7 +1198,9 @@ end
 --  - Server enforces per-player cooldown
 -- ============================
 function PropHunt_onTauntRequest(playerId, data)
+    if isEventFlood(gameState.lastTauntEvent, playerId, config.minEventGapTaunt) then return end
     local payload = tostring(data or "")
+    if #payload > 64 then return end
     local isServerVeh = payload:match("^%d+%-%d+$") ~= nil
     local vehId = tonumber(payload)
     if (not isServerVeh) and (not vehId) then
@@ -1140,7 +1231,27 @@ MP.RegisterEvent("PropHunt_TauntRequest", "PropHunt_onTauntRequest")
 --  we assume the client only sends valid tags. Later we can add client-side distance checks.)
 -- ============================
 function PropHunt_onTagRequest(playerId, data)
-    local targetId = tonumber(data)
+    if isEventFlood(gameState.lastTagEvent, playerId, config.minEventGapTag) then return end
+    local raw = tostring(data or "")
+    if #raw > 96 then return end
+
+    local reqRoundId = tonumber(gameState.roundId or -1)
+    local targetId = nil
+    local reqToken = nil
+
+    if raw:find("|", 1, true) then
+        local a, b, c = raw:match("^([^|]+)|([^|]+)|?(.*)$")
+        if a and b then
+            local r = tonumber(a)
+            local t = tonumber(b)
+            if r then reqRoundId = r end
+            targetId = t
+            if c and c ~= "" then reqToken = tostring(c) end
+        end
+    else
+        targetId = tonumber(raw)
+    end
+
     if not targetId then return end
 
     if config.debug then
@@ -1195,8 +1306,27 @@ function PropHunt_onTagRequest(playerId, data)
         return
     end
 
+    -- Corroboration path: require recent contact claim(s) before accepting tag.
+    if config.requireTagCorroboration ~= false then
+        local roundNow = tonumber(gameState.roundId or -1)
+        local aToB = hasRecentContactClaim(playerId, targetId, roundNow)
+        local bToA = hasRecentContactClaim(targetId, playerId, roundNow)
+
+        if config.requireMutualContact == true then
+            if not (aToB and bToA) then
+                if config.debug then print("PropHunt[TAG] rejected: missing mutual contact corroboration") end
+                return
+            end
+        else
+            if not (aToB or bToA) then
+                if config.debug then print("PropHunt[TAG] rejected: missing contact corroboration") end
+                return
+            end
+        end
+    end
+
     -- record last target for anti-spam
-    gameState.lastTaggedTarget[playerId] = { id = targetId, t = now() }
+    gameState.lastTaggedTarget[playerId] = { id = targetId, t = now(), token = reqToken }
     gameState.roundTags = (gameState.roundTags or 0) + 1
 
     local seekerName = gameState.players[playerId].name or (MP.GetPlayerName(playerId) or tostring(playerId))
@@ -1245,10 +1375,38 @@ function PropHunt_onTagRequest(playerId, data)
     end
 end
 
--- Outbreak-style alias: "contact" event
+-- Outbreak-style contact corroboration event
 function PropHunt_onContactReceive(playerId, data)
-    -- data: targetPlayerId
-    PropHunt_onTagRequest(playerId, data)
+    local raw = tostring(data or "")
+    if raw == "" or #raw > 128 then return end
+
+    -- accepted payloads:
+    --   "<targetId>"
+    --   "<roundId>|<targetId>"
+    --   "<roundId>|<targetId>|<token>"
+    local rid = tonumber(gameState.roundId or -1)
+    local targetId = nil
+    local token = nil
+
+    if raw:find("|", 1, true) then
+        local a, b, c = raw:match("^([^|]+)|([^|]+)|?(.*)$")
+        if a and b then
+            rid = tonumber(a) or rid
+            targetId = tonumber(b)
+            if c and c ~= "" then token = tostring(c) end
+        end
+    else
+        targetId = tonumber(raw)
+    end
+
+    if not targetId then return end
+    if not gameState.active or gameState.phase ~= "round" then return end
+    if not isInGame(playerId) or not isInGame(targetId) then return end
+
+    recordContactClaim(playerId, targetId, rid, token)
+
+    -- Back-compat path: older clients used contact as immediate tag request.
+    PropHunt_onTagRequest(playerId, tostring(rid) .. "|" .. tostring(targetId) .. (token and ("|" .. token) or ""))
 end
 MP.RegisterEvent("PropHunt_onContactReceive", "PropHunt_onContactReceive")
 
@@ -1261,6 +1419,7 @@ MP.RegisterEvent("PropHunt_TagRequest", "PropHunt_onTagRequest")
 -- Client calls: TriggerServerEvent("PropHunt_ScanRequest", "")
 -- Server validates teams + alive state + cooldown, then tells that seeker to run a local scan pulse.
 function PropHunt_onScanRequest(playerId, data)
+    if isEventFlood(gameState.lastScanEvent, playerId, config.minEventGapScan) then return end
     if not gameState.active or gameState.phase ~= "round" then return end
     if not isInGame(playerId) or not isAlive(playerId) then return end
     if team(playerId) ~= "seeker" then return end
