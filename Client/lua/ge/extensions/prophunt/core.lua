@@ -611,7 +611,10 @@ local function onUpdate(dt)
                     end
                 end
                 if targetVeh and targetVeh.delete then
-                    pcall(function() targetVeh:delete("prophunt_postround_delete") end)
+                    -- Safety: never hard-delete local-owned vehicles from client cleanup.
+                    if not targetVeh.isLocal then
+                        pcall(function() targetVeh:delete("prophunt_postround_delete") end)
+                    end
                 end
                 pendingHardDelete[svs] = nil
             end
@@ -971,6 +974,22 @@ end
 onGameEnd = function(data)
     -- data may contain a reason/winner string from server (timeout/seekers/manual/etc)
     local reason = tostring(data or "")
+
+    -- Safety: if round-end restore was missed due to event ordering, force one here.
+    if preDisguiseModelKey and core_vehicles and core_vehicles.replaceVehicle then
+        local okRep, errRep = pcall(function()
+            if preDisguiseConfig and preDisguiseConfig ~= '' then
+                core_vehicles.replaceVehicle(preDisguiseModelKey, { config = preDisguiseConfig })
+            else
+                core_vehicles.replaceVehicle(preDisguiseModelKey, {})
+            end
+        end)
+        if okRep then
+            print("[PH] game-end forced restore -> " .. tostring(preDisguiseModelKey))
+        else
+            print("WARN: game-end forced restore failed: " .. tostring(errRep))
+        end
+    end
 
     playerTeam = nil
     gameActive = false
@@ -1493,6 +1512,37 @@ onRoundEnd = function(data)
         end
     end
 
+    -- Hard safety: in replace/fallback paths, force-restore local hider vehicle model.
+    if playerTeam == "hider" and preDisguiseModelKey and core_vehicles and core_vehicles.replaceVehicle then
+        local function doRestoreReplace()
+            local okRep, errRep = pcall(function()
+                if preDisguiseConfig and preDisguiseConfig ~= '' then
+                    core_vehicles.replaceVehicle(preDisguiseModelKey, { config = preDisguiseConfig })
+                else
+                    core_vehicles.replaceVehicle(preDisguiseModelKey, {})
+                end
+            end)
+            if okRep then
+                print("[PH] round-end forced restore -> " .. tostring(preDisguiseModelKey))
+            else
+                print("WARN: round-end forced restore failed: " .. tostring(errRep))
+            end
+        end
+
+        doRestoreReplace()
+        if scheduler and scheduler.add then
+            local t = 0
+            scheduler.add(function(dt)
+                t = t + (dt or 0)
+                if t >= 0.25 then
+                    doRestoreReplace()
+                    return false
+                end
+                return true
+            end)
+        end
+    end
+
     if propVehId and be:getObjectByID(propVehId) then
         local pv = be:getObjectByID(propVehId)
         pcall(function() pv:setActive(0) end)
@@ -1910,7 +1960,7 @@ cleanupTempSpawnSwapProps = function()
             local idx = tonumber(idxStr)
             if pid and idx then
                 byOwner[pid] = byOwner[pid] or {}
-                table.insert(byOwner[pid], { svs = svs, idx = idx })
+                table.insert(byOwner[pid], { svs = svs, idx = idx, isLocal = (veh.isLocal == true) })
             end
         end
 
@@ -1920,8 +1970,11 @@ cleanupTempSpawnSwapProps = function()
         for _, list in pairs(byOwner) do
             for _, v in ipairs(list) do
                 if (tonumber(v.idx) or -1) > 0 then
-                    clearTempPropByServerString(v.svs)
-                    changed = true
+                    -- Safety: do not client-delete local-owned temporary vehicles.
+                    if not v.isLocal then
+                        clearTempPropByServerString(v.svs)
+                        changed = true
+                    end
                 end
             end
         end
