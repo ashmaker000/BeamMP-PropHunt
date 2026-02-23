@@ -75,6 +75,7 @@ local disguiseMode = "replace"
 local forceGhostOffOnRestore = true
 local spawnswapRetryCount = 2
 local spawnswapDisabledRound = nil
+local spawnswapDisabledReason = nil
 local preSpawnAttemptedRound = nil
 local cleanupSweepSeconds = 15
 local seekerTabPrevention = true
@@ -864,6 +865,7 @@ local function resetRoundState(roundId)
     lastStateRequestAt = 0
     propStateRequestedRound = nil
     spawnswapDisabledRound = nil
+    spawnswapDisabledReason = nil
     preSpawnAttemptedRound = nil
 end
 
@@ -1136,7 +1138,9 @@ spawnAndAttachProp = function(propName)
         disableSpawnswapForRound = function(reason)
             if currentRoundId then
                 spawnswapDisabledRound = currentRoundId
-                print("[PH] spawnswap disabled for round " .. tostring(currentRoundId) .. " reason=" .. tostring(reason))
+                spawnswapDisabledReason = tostring(reason or "unknown")
+                print("[PH] spawnswap disabled for round " .. tostring(currentRoundId) .. " reason=" .. tostring(spawnswapDisabledReason))
+                beamMessage({ msg = "Spawnswap disabled: " .. tostring(spawnswapDisabledReason), ttl = 3, icon = 'warning' })
             end
         end,
         getCurrentRoundId = function() return currentRoundId end,
@@ -1172,7 +1176,9 @@ preSpawnIfNeeded = function()
         disableSpawnswapForRound = function(reason)
             if currentRoundId then
                 spawnswapDisabledRound = currentRoundId
-                print("[PH] pre-spawn disabled for round " .. tostring(currentRoundId) .. " reason=" .. tostring(reason))
+                spawnswapDisabledReason = tostring(reason or "unknown")
+                print("[PH] pre-spawn disabled for round " .. tostring(currentRoundId) .. " reason=" .. tostring(spawnswapDisabledReason))
+                beamMessage({ msg = "Pre-spawn disabled: " .. tostring(spawnswapDisabledReason), ttl = 3, icon = 'warning' })
             end
         end,
         getCurrentRoundId = function() return currentRoundId end,
@@ -1794,6 +1800,9 @@ onHudPulse = function(data)
 
     local objective = (playerTeam == "seeker") and "Find and tag hiders" or "Survive and waste time"
     local msg = string.format("%s | H:%d/%d S:%d | %s | preset=%s", string.upper(phase), alive, hiders, seekers, objective, preset)
+    if playerTeam == "hider" and currentRoundId and spawnswapDisabledRound == currentRoundId and spawnswapDisabledReason then
+        msg = msg .. " | spawnswap=" .. tostring(spawnswapDisabledReason)
+    end
     local key = msg .. "|" .. tostring(rTimer) .. "|" .. tostring(hTimer)
 
     local t = os.clock()

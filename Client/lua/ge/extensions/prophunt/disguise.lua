@@ -290,6 +290,10 @@ function M.spawnAndAttachProp(ctx, propName)
   end
 
   local mode = (ctx.getDisguiseMode and tostring(ctx.getDisguiseMode() or "replace"):lower()) or "replace"
+  local effectiveMode = mode
+  if mode == "spawnswap" and ctx.isSpawnswapDisabledForRound and ctx.isSpawnswapDisabledForRound() then
+    effectiveMode = "replace"
+  end
   local forceGhostOff = (ctx.getForceGhostOffOnRestore and ctx.getForceGhostOffOnRestore() ~= false) or true
   local retryCount = math.max(1, math.floor((ctx.getSpawnswapRetryCount and tonumber(ctx.getSpawnswapRetryCount())) or 1))
 
