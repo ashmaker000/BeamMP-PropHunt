@@ -262,7 +262,7 @@ function M.preSpawnProp(ctx, propName)
   if ctx.setPropVehId then ctx.setPropVehId(newId) end
   if ctx.setOriginalVehId then ctx.setOriginalVehId(myVehId) end
 
-  reportTempPropServerString(ctx, newId, 2.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
+  reportTempPropServerString(ctx, newId, 8.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
 
   print("DEBUG: PRESPAWN_OK propId=" .. tostring(newId) .. " originalId=" .. tostring(myVehId))
 end
@@ -359,7 +359,7 @@ function M.spawnAndAttachProp(ctx, propName)
     stashVehicleFarAway(myVeh, oldPos, oldRot)
 
     if ctx.setPropVehId then ctx.setPropVehId(newId) end
-    reportTempPropServerString(ctx, newId, 2.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
+    reportTempPropServerString(ctx, newId, 8.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
     return true
   end
 

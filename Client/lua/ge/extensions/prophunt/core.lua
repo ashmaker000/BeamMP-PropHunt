@@ -81,6 +81,39 @@ local cleanupSweepSeconds = 15
 local seekerTabPrevention = true
 local seekerLockedVehId = nil
 local lastSeekerTabWarnAt = 0
+local lastLegalPlayerPos = nil
+local lastLegalPlayerRot = nil
+local antiTeleportMaxMetersPerFrame = 35
+local antiTeleportMaxDt = 0.5
+
+local actionFilterGlobalActive = false
+local actionFilterHiderActive = false
+local topCameraResolvedName = nil
+local topCameraResolveAttempted = false
+local globalBlockedActions = {
+    "freeCamera", "toggleFreeCamera", "cameraFree",
+    "dropPlayerAtCamera", "dropPlayerAtCameraNoReset",
+    "nodeGrabber", "nodegrabber", "nodegrabberGrab", "nodegrabberRotate", "nodegrabberTranslate"
+}
+local hiderBlockedActions = {
+    "recover", "recover_vehicle", "recover_vehicle_alt",
+    "reset_physics", "reset_all_physics",
+    "loadHome", "saveHome",
+    "boost", "jump", "nitrous", "activateNitrous", "toggleNitrous",
+    "funStuffBoost", "funStuffJump", "vehicleDebugBoost", "arcadeBoost"
+}
+local movingResetBlockedActions = {
+    "dropPlayerAtCamera", "dropPlayerAtCameraNoReset",
+    "recover", "recover_vehicle", "recover_vehicle_alt", "recover_to_last_road",
+    "reset_physics", "reset_all_physics", "reload_vehicle", "reload_all_vehicles"
+}
+local movingResetLockActive = false
+local disableResetsWhenMoving = true
+local maxResetMovingSpeed = 2.0
+local movementResetGraceSeconds = 5.0
+local movementResetTimer = 0
+local lastMovementPos = vec3()
+local lastMovementPosReady = false
 local lastHudPulseMsgAt = 0
 local lastHudPulseKey = ""
 local postRoundCleanupUntil = 0
@@ -145,7 +178,7 @@ local hunterTagColor = color(255, 50, 50, 255)
 local hunterTagBack = color(0, 0, 0, 150)
 local hunterTagPos = vec3()
 
-local PH_BUILD = "2026-02-11-phase2e"
+local PH_BUILD = "Latest"
 
 local function onExtensionLoaded()
     print("DEBUG: PropHunt Core LOADED (" .. PH_BUILD .. ")")
@@ -161,6 +194,8 @@ local function onExtensionLoaded()
 
     phAudio.initTauntFiles()
     print("DEBUG: PropHunt found " .. tostring(phAudio.getTauntCount()) .. " taunt sounds")
+    topCameraResolvedName = nil
+    topCameraResolveAttempted = false
 
     -- Load taunt sound emitter helper (random taunt sounds)
     if extensions and extensions.load then
@@ -247,6 +282,54 @@ local function setProximityVignette(strength, intensity)
     visuals.setProximityVignette(strength, intensity)
 end
 
+local function getCombinePassFX()
+    if not scenetree then return nil end
+    return scenetree["PostEffectCombinePassObject"] or scenetree.findObject("PostEffectCombinePassObject")
+end
+
+local function clearSeekerBlackoutFallback()
+    local fx = getCombinePassFX()
+    if fx and fx.setField then
+        pcall(function() fx:setField("enableBlueShift", 0, 0) end)
+        pcall(function() fx:setField("blueShiftColor", 0, "0 0 0") end)
+    end
+end
+
+local function forceSeekerBlackoutNow()
+    if not (hidePhase and playerTeam == "seeker") then return end
+
+    if extensions and not extensions.vignetteShaderAPI and extensions.load then
+        pcall(function() extensions.load("vignetteShaderAPI") end)
+    end
+    if extensions and not extensions.prophuntBlurAPI and extensions.load then
+        pcall(function() extensions.load("prophuntBlurAPI") end)
+    end
+
+    if extensions and extensions.vignetteShaderAPI then
+        pcall(function()
+            extensions.vignetteShaderAPI.setEnabled(true)
+            extensions.vignetteShaderAPI.setInnerRadius(0.0)
+            extensions.vignetteShaderAPI.setOuterRadius(0.0)
+            extensions.vignetteShaderAPI.setColor(Point4F(0, 0, 0, 1.0))
+        end)
+    end
+
+    if extensions and extensions.prophuntBlurAPI then
+        pcall(function()
+            extensions.prophuntBlurAPI.setStrength(3.0)
+            extensions.prophuntBlurAPI.setEnabled(true)
+        end)
+    end
+
+    -- Fallback for builds where vignette pipeline is unreliable:
+    -- force full-screen darkening through combine pass.
+    local fx = getCombinePassFX()
+    if fx and fx.setField then
+        pcall(function() fx:setField("enableBlueShift", 0, 1) end)
+        pcall(function() fx:setField("blueShiftColor", 0, "0 0 0") end)
+    end
+end
+
 local function forceLocalVehicleVisible()
     local veh = be:getPlayerVehicle(0)
     if not veh then return end
@@ -256,6 +339,211 @@ local function forceLocalVehicleVisible()
             core_vehicleBridge.executeAction(veh, 'setFreeze', false)
         end
     end)
+end
+
+local function resolveTopCameraNameOnce()
+    if topCameraResolveAttempted then return end
+    topCameraResolveAttempted = true
+
+    local candidates = { "topDown", "cameraTopDown", "cameraTop", "topdown" }
+    local discovered = {}
+    pcall(function()
+        if core_camera and core_camera.getPlayerCameras then
+            local cams = core_camera.getPlayerCameras(0)
+            if type(cams) == "table" then
+                for _, c in pairs(cams) do
+                    if type(c) == "table" and c.name then table.insert(discovered, tostring(c.name))
+                    elseif type(c) == "string" then table.insert(discovered, tostring(c)) end
+                end
+            end
+        end
+    end)
+
+    local function trySet(name)
+        local okAny = false
+        if commands and commands.setGameCamera then
+            local ok = pcall(function() commands.setGameCamera(name) end)
+            okAny = okAny or ok
+        end
+        if core_camera and core_camera.setByName then
+            local okA = pcall(function() core_camera.setByName(name) end)
+            local okB = pcall(function() core_camera.setByName(0, name) end)
+            okAny = okAny or okA or okB
+        end
+        if core_camera and core_camera.setCameraByName then
+            local okA = pcall(function() core_camera.setCameraByName(name) end)
+            local okB = pcall(function() core_camera.setCameraByName(0, name) end)
+            okAny = okAny or okA or okB
+        end
+        return okAny
+    end
+
+    for _, n in ipairs(discovered) do
+        local low = string.lower(n)
+        if string.find(low, "top", 1, true) and trySet(n) then
+            topCameraResolvedName = n
+            break
+        end
+    end
+
+    if not topCameraResolvedName then
+        for _, n in ipairs(candidates) do
+            if trySet(n) then
+                topCameraResolvedName = n
+                break
+            end
+        end
+    end
+
+    print("[PH] top-camera resolved=" .. tostring(topCameraResolvedName or "topDown"))
+end
+
+local function enforceSeekerHideTopCamera()
+    if not (gameActive and hidePhase and playerTeam == "seeker") then return end
+    resolveTopCameraNameOnce()
+    local name = topCameraResolvedName or "topDown"
+    pcall(function()
+        if commands and commands.setGameCamera then commands.setGameCamera(name) end
+        if core_camera and core_camera.setByName then
+            core_camera.setByName(name)
+            core_camera.setByName(0, name)
+        end
+        if core_camera and core_camera.setCameraByName then
+            core_camera.setCameraByName(name)
+            core_camera.setCameraByName(0, name)
+        end
+    end)
+end
+
+local function enforceHiderAbilityLock()
+    if not (gameActive and playerTeam == "hider") then return end
+    local veh = be:getPlayerVehicle(0)
+    if not veh then return end
+    local cmd = [[
+      if input and input.event then
+        local kill = {
+          'nodeGrabber','nodegrabber','nodegrabberGrab','nodegrabberRotate','nodegrabberTranslate',
+          'boost','jump','recover','recover_vehicle','dropPlayerAtCameraNoReset'
+        }
+        for _, a in ipairs(kill) do input.event(a, 0, 2) end
+      end
+    ]]
+    pcall(function() veh:queueLuaCommand(cmd) end)
+end
+
+local function enforceActionFilters()
+    if not core_input_actionFilter then return end
+
+    local shouldGlobal = (gameActive == true)
+    if shouldGlobal ~= actionFilterGlobalActive then
+        core_input_actionFilter.setGroup("ph_global_lock", globalBlockedActions)
+        core_input_actionFilter.addAction(0, "ph_global_lock", shouldGlobal)
+        actionFilterGlobalActive = shouldGlobal
+    end
+
+    local shouldHider = (gameActive == true and playerTeam == "hider")
+    if shouldHider ~= actionFilterHiderActive then
+        core_input_actionFilter.setGroup("ph_hider_lock", hiderBlockedActions)
+        core_input_actionFilter.addAction(0, "ph_hider_lock", shouldHider)
+        actionFilterHiderActive = shouldHider
+    end
+end
+
+local function enforceGlobalCheatKeyLock()
+    if not gameActive then return end
+    pcall(function()
+      if input and input.event then
+        input.event('freeCamera', 0, 2)
+        input.event('toggleFreeCamera', 0, 2)
+        input.event('dropPlayerAtCamera', 0, 2)
+        input.event('dropPlayerAtCameraNoReset', 0, 2)
+        input.event('nodeGrabber', 0, 2)
+      end
+    end)
+end
+
+local function enforceMovingResetLock(dt)
+    if not core_input_actionFilter then return end
+    local shouldBlock = false
+
+    if gameActive and disableResetsWhenMoving then
+        local veh = be:getPlayerVehicle(0)
+        if veh and veh.getID and veh.getVelocityXYZ then
+            local vid = veh:getID()
+            local own = true
+            if MPVehicleGE and MPVehicleGE.isOwn then
+                local okOwn, isOwnVeh = pcall(function() return MPVehicleGE.isOwn(vid) end)
+                if okOwn then own = (isOwnVeh == true) end
+            end
+
+            if own then
+                local pos = vec3(be:getObjectOOBBCenterXYZ(vid))
+                local vel = vec3(veh:getVelocityXYZ())
+
+                if lastMovementPosReady then
+                    if pos:squaredDistance(lastMovementPos) > (1.0 * 1.0) then
+                        movementResetTimer = movementResetGraceSeconds
+                        lastMovementPos:set(pos)
+                    else
+                        movementResetTimer = math.max(0, movementResetTimer - (dt or 0))
+                    end
+                else
+                    lastMovementPos:set(pos)
+                    lastMovementPosReady = true
+                end
+
+                shouldBlock = (vel:length() >= (maxResetMovingSpeed or 2.0)) or (movementResetTimer > 0)
+            end
+        end
+    end
+
+    if shouldBlock ~= movingResetLockActive then
+        core_input_actionFilter.setGroup("ph_moving_reset_lock", movingResetBlockedActions)
+        core_input_actionFilter.addAction(0, "ph_moving_reset_lock", shouldBlock)
+        movingResetLockActive = shouldBlock
+    end
+
+    if not gameActive then
+        movementResetTimer = 0
+        lastMovementPosReady = false
+    end
+end
+
+local function enforceAntiTeleport(dt)
+    if not gameActive then
+        lastLegalPlayerPos = nil
+        lastLegalPlayerRot = nil
+        return
+    end
+
+    local veh = be:getPlayerVehicle(0)
+    if not veh then return end
+    local pos = veh:getPosition()
+    local rot = veh:getRotation()
+    if not pos then return end
+
+    if lastLegalPlayerPos then
+        local dx = (pos.x or 0) - (lastLegalPlayerPos.x or 0)
+        local dy = (pos.y or 0) - (lastLegalPlayerPos.y or 0)
+        local dz = (pos.z or 0) - (lastLegalPlayerPos.z or 0)
+        local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if dist >= antiTeleportMaxMetersPerFrame then
+            local rx, ry, rz, rw = 0, 0, 0, 1
+            if lastLegalPlayerRot then
+                rx, ry, rz, rw = lastLegalPlayerRot.x, lastLegalPlayerRot.y, lastLegalPlayerRot.z, lastLegalPlayerRot.w
+            end
+            pcall(function()
+                veh:setPositionRotation(lastLegalPlayerPos.x, lastLegalPlayerPos.y, lastLegalPlayerPos.z, rx, ry, rz, rw)
+            end)
+            beamMessage({ msg = "Teleport blocked", ttl = 1.2, icon = 'block' })
+            return
+        end
+    end
+
+    lastLegalPlayerPos = vec3(pos.x, pos.y, pos.z)
+    if rot then
+        lastLegalPlayerRot = quat(rot.x, rot.y, rot.z, rot.w)
+    end
 end
 
 local function queueHardDelete(serverVeh, delaySec)
@@ -590,6 +878,17 @@ local function onUpdate(dt)
         if flashUiTimer < 0 then flashUiTimer = 0 end
     end
 
+    enforceActionFilters()
+    enforceMovingResetLock(dt)
+    enforceAntiTeleport(dt)
+    if gameActive then
+        enforceSeekerHideTopCamera()
+        enforceGlobalCheatKeyLock()
+    end
+    if playerTeam == "hider" and gameActive then
+        enforceHiderAbilityLock()
+    end
+
     -- Post-round safety sweep: for a short window after round/game end,
     -- repeatedly dedupe owner vehicles to kill late stale nametags.
     if (not gameActive) and postRoundCleanupUntil and os.clock() < postRoundCleanupUntil then
@@ -753,6 +1052,9 @@ local function onUpdate(dt)
     else
         setProximityVignette(0, 0)
     end
+
+    -- Hard-override: seeker hide phase must remain fully black every frame.
+    forceSeekerBlackoutNow()
 
     -- AUTO TAUNT
     -- Keep nametags hidden for seeker throughout the round (some builds re-enable them)
@@ -922,6 +1224,8 @@ onGameStart = function(data)
     pendingHardDelete = {}
     gameTimer = 300
     lastGameTimer = 300 -- reset timer tracking
+    lastLegalPlayerPos = nil
+    lastLegalPlayerRot = nil
 
     -- Ensure vehicle-side hooks are loaded, then start collision checks.
     ensureVehicleExtensionsLoaded(true)
@@ -954,6 +1258,11 @@ onGameStart = function(data)
             icon = 'visibility'
         })
         print("DEBUG: You are a SEEKER")
+
+        -- If role assignment arrives after hide phase already started, enforce now.
+        if hidePhase then
+            beginSeekerHidePhaseEnforcement()
+        end
     else
         -- Ensure hiders can still see nametags
         if MPVehicleGE and MPVehicleGE.hideNicknames then
@@ -1003,8 +1312,11 @@ onGameEnd = function(data)
     hideTimer = 0
     allowDisguise = false
     seekerLockedVehId = nil
+    lastLegalPlayerPos = nil
+    lastLegalPlayerRot = nil
 
     setSeekerVisualBlock(false)
+    clearSeekerBlackoutFallback()
 
     -- Best-effort: restore a normal camera at end
     pcall(function()
@@ -1189,6 +1501,41 @@ preSpawnIfNeeded = function()
     }, assignedPropName)
 end
 
+local function beginSeekerHidePhaseEnforcement()
+    local playerVeh = be:getPlayerVehicle(0)
+    if playerVeh then
+        core_vehicleBridge.executeAction(playerVeh, 'setFreeze', true)
+        print("DEBUG: Seeker vehicle frozen during hide phase")
+    end
+
+    setSeekerVisualBlock(true)
+    applyHideCameraLock(true)
+
+    if scheduler and scheduler.add then
+        if hideVisualTask then hideVisualTask = nil end
+        hideVisualTask = scheduler.add(function(dt)
+            setSeekerVisualBlock(true)
+            if not hidePhase then
+                hideVisualTask = nil
+                return false
+            end
+            return true
+        end)
+
+        if hideCameraTask then hideCameraTask = nil end
+        hideCameraTask = scheduler.add(function(dt)
+            enforceSeekerHideTopCamera()
+            if not hidePhase then
+                hideCameraTask = nil
+                return false
+            end
+            return true
+        end)
+    else
+        enforceSeekerHideTopCamera()
+    end
+end
+
 -- Hide phase handlers
 onHidePhaseStart = function(data)
     -- data: "roundId,seconds" (new) or just seconds
@@ -1217,54 +1564,9 @@ onHidePhaseStart = function(data)
         end
     end
 
-    -- Freeze seeker's vehicle during hide phase
+    -- Freeze seeker + enforce top camera during hide phase
     if playerTeam == "seeker" then
-        local playerVeh = be:getPlayerVehicle(0)
-        if playerVeh then
-            core_vehicleBridge.executeAction(playerVeh, 'setFreeze', true)
-            print("DEBUG: Seeker vehicle frozen during hide phase")
-        end
-
-        setSeekerVisualBlock(true)
-        applyHideCameraLock(true)
-        if scheduler and scheduler.add then
-            if hideVisualTask then hideVisualTask = nil end
-            hideVisualTask = scheduler.add(function(dt)
-                setSeekerVisualBlock(true)
-                if not hidePhase then
-                    hideVisualTask = nil
-                    return false
-                end
-                return true
-            end)
-            if hideCameraTask then hideCameraTask = nil end
-            hideCameraTask = scheduler.add(function(dt)
-                if commands and commands.setGameCamera then
-                    commands.setGameCamera('topDown')
-                end
-                if core_camera and core_camera.setByName then
-                    core_camera.setByName('topDown')
-                end
-                if core_camera and core_camera.setCameraByName then
-                    core_camera.setCameraByName('topDown')
-                end
-                if not hidePhase then
-                    hideCameraTask = nil
-                    return false
-                end
-                return true
-            end)
-        else
-            pcall(function()
-                if commands and commands.setGameCamera then
-                    commands.setGameCamera('topDown')
-                end
-                if core_camera and core_camera.setByName then
-                    core_camera.setByName('topDown')
-                end
-            end)
-        end
-
+        beginSeekerHidePhaseEnforcement()
         beamMessage({
             msg = "Wait " .. hideTimer .. " seconds while hiders hide...",
             ttl = 3,
@@ -1314,6 +1616,7 @@ onHidePhaseEnd = function(data)
         end
 
         setSeekerVisualBlock(false)
+        clearSeekerBlackoutFallback()
         applyHideCameraLock(false)
         if hideVisualTask then
             hideVisualTask = nil
@@ -1779,6 +2082,17 @@ onSettings = function(data)
         seekerTabPrevention = not (b == "false" or b == "0" or b == "off")
     end
 
+    -- Optional (backward-compatible): moving reset lock controls.
+    if #parts >= 11 then
+        local b = tostring(parts[11] or ""):lower()
+        disableResetsWhenMoving = not (b == "false" or b == "0" or b == "off")
+    end
+
+    if #parts >= 12 then
+        local v = tonumber(parts[12])
+        if v then maxResetMovingSpeed = math.max(0, v) end
+    end
+
     preSpawnIfNeeded()
 end
 
@@ -2034,6 +2348,14 @@ M.onVehicleSwitched = function(oldId, newId)
     requestStateBurst()
 end
 M.onPreRender = function(dt)
+    if hidePhase and playerTeam == "seeker" then
+        -- Last-frame hard override so nothing else can clear the blackout.
+        forceSeekerBlackoutNow()
+    end
+
+    if gameActive then
+        enforceSeekerHideTopCamera()
+    end
     if playerTeam == "hider" and not hidePhase and closestHunterInfo and closestHunterInfo.dist and closestHunterInfo.dist < HUNTER_NOTICE_DISTANCE then
         drawHunterTag(closestHunterInfo)
     end

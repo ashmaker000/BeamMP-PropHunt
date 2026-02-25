@@ -1,12 +1,17 @@
 local M = {}
 M.BUILD = "2026-02-11-phase2e"
 
+local seekerVisualBlockActive = false
+
 function M.setSeekerVisualBlock(state)
+  seekerVisualBlockActive = (state == true)
+
   if extensions and extensions.vignetteShaderAPI then
-    if state then
+    if seekerVisualBlockActive then
       extensions.vignetteShaderAPI.setEnabled(true)
+      -- Full-screen blackout (same trick as flashbang, but black).
       extensions.vignetteShaderAPI.setInnerRadius(0.0)
-      extensions.vignetteShaderAPI.setOuterRadius(1.0)
+      extensions.vignetteShaderAPI.setOuterRadius(0.0)
       extensions.vignetteShaderAPI.setColor(Point4F(0, 0, 0, 1.0))
     else
       extensions.vignetteShaderAPI.resetVignette()
@@ -15,7 +20,7 @@ function M.setSeekerVisualBlock(state)
 
   if extensions and extensions.prophuntBlurAPI then
     if state then
-      extensions.prophuntBlurAPI.setStrength(2.0)
+      extensions.prophuntBlurAPI.setStrength(3.0)
       extensions.prophuntBlurAPI.setEnabled(true)
     else
       extensions.prophuntBlurAPI.reset()
@@ -25,6 +30,10 @@ end
 
 function M.setProximityVignette(strength, intensity)
   if not extensions or not extensions.vignetteShaderAPI then return end
+
+  -- Never let proximity effects override the seeker blackout during hide phase.
+  if seekerVisualBlockActive then return end
+
   local alpha = 0
   if strength and strength > 0 and intensity and intensity > 0 then
     local normalizedStrength = math.min(math.max(strength, 0), 1)
