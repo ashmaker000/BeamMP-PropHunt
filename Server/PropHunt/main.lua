@@ -43,6 +43,7 @@ do
             forceGhostOffOnRestore = true,
             spawnswapRetryCount = 2,
             seekerTabPrevention = true,
+            hideNametagsInRound = true,
             seekerFadeDist = 120,
             seekerFilterIntensity = 1.0,
             hiderFadeDist = 120,
@@ -74,6 +75,7 @@ if config.cleanupSweepSeconds == nil then config.cleanupSweepSeconds = tonumber(
 if config.spawnswapRetryCount == nil then config.spawnswapRetryCount = 2 end
 if config.allowSoloTest == nil then config.allowSoloTest = false end
 if config.seekerTabPrevention == nil then config.seekerTabPrevention = true end
+if config.hideNametagsInRound == nil then config.hideNametagsInRound = true end
 if config.adminAclEnabled == nil then config.adminAclEnabled = false end
 if config.adminIds == nil then config.adminIds = {} end
 if config.adminNames == nil then config.adminNames = {} end
@@ -429,6 +431,7 @@ local function formatSettingsPayload()
         .. "," .. tostring(math.max(1, tonumber(config.spawnswapRetryCount or 1) or 1))
         .. "," .. tostring(math.max(1, tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15))
         .. "," .. tostring(config.seekerTabPrevention ~= false)
+        .. "," .. tostring(config.hideNametagsInRound ~= false)
 end
 
 local function pushSettingsToClient(playerId)
@@ -851,7 +854,7 @@ local function showStatus(playerId)
     send(playerId, string.format("Config: hideTime=%ds roundTime=%ds joinPolicy=%s disguiseMode=%s forcedProp=%s", tonumber(config.hideTime or 60), tonumber(config.roundTime or 300), tostring(config.joinPolicy or "lock_next_round"), tostring(config.disguiseMode or "replace"), tostring(config.nextRoundForcedProp or "random")))
     send(playerId, string.format("Profiles: preset=%s map=%s propTierMode=%s perks=%s", tostring(config.currentPreset or "custom"), tostring(gameState.currentMapKey or "unknown"), tostring(config.propTierMode or "all"), tostring(config.perksEnabled == true)))
     send(playerId, string.format("Visuals: seekerFade=%.1f seekerIntensity=%.2f hiderFade=%.1f hiderIntensity=%.2f", tonumber(config.seekerFadeDist or 120), tonumber(config.seekerFilterIntensity or 1), tonumber(config.hiderFadeDist or 120), tonumber(config.hiderFilterIntensity or 0.35)))
-    send(playerId, string.format("Stability: forceGhostOffOnRestore=%s cleanupSweepSeconds=%s spawnswapRetryCount=%s seekerTabPrevention=%s", tostring(config.forceGhostOffOnRestore ~= false), tostring(tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15), tostring(tonumber(config.spawnswapRetryCount or 1) or 1), tostring(config.seekerTabPrevention ~= false)))
+    send(playerId, string.format("Stability: forceGhostOffOnRestore=%s cleanupSweepSeconds=%s spawnswapRetryCount=%s seekerTabPrevention=%s hideNametagsInRound=%s", tostring(config.forceGhostOffOnRestore ~= false), tostring(tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15), tostring(tonumber(config.spawnswapRetryCount or 1) or 1), tostring(config.seekerTabPrevention ~= false), tostring(config.hideNametagsInRound ~= false)))
 end
 
 local function showHelp(playerId)
@@ -876,6 +879,7 @@ local function showHelp(playerId)
     send(playerId, "  /ph set cleanupsweep <seconds>")
     send(playerId, "  /ph set spawnswapretry <n>")
     send(playerId, "  /ph set seekertablock <on|off>")
+    send(playerId, "  /ph set nametags <on|off> - on=show tags, off=hide tags during active round")
     send(playerId, "  /ph set seekerfadedist <meters> - (Seekers) proximity vignette range")
     send(playerId, "  /ph set seekerfilterintensity <0-1> - (Seekers) vignette strength")
     send(playerId, "  /ph set hiderfadedist <meters> - (Hiders) proximity vignette range")
@@ -1254,6 +1258,17 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             broadcast("seekerTabPrevention=" .. tostring(config.seekerTabPrevention))
             broadcastSettings()
             return 1
+        elseif key == "nametags" then
+            local v = tostring(words[3] or ""):lower()
+            if v ~= "on" and v ~= "off" then
+                send(playerId, "Usage: /phset nametags <on|off>")
+                return 1
+            end
+            -- Human-friendly: nametags off => hide tags during round.
+            config.hideNametagsInRound = (v == "off")
+            broadcast("hideNametagsInRound=" .. tostring(config.hideNametagsInRound) .. " (nametags " .. v .. ")")
+            broadcastSettings()
+            return 1
         elseif key == "seekerfadedist" then
             local m = tonumber(words[3])
             if not m then
@@ -1371,6 +1386,9 @@ function PropHunt_requestState(playerId, data)
 end
 MP.RegisterEvent("PropHunt_requestState", "PropHunt_requestState")
 
+-- Forward declaration (used by PropHunt_tempPropSet before helper section is defined)
+local isEventFlood
+
 -- Temporary spawned prop registration (for cleanup on all clients)
 function PropHunt_tempPropSet(playerId, data)
     if isEventFlood(gameState.lastTempPropEvent, playerId, config.minEventGapTempProp) then return end
@@ -1409,7 +1427,7 @@ local function isOnCooldown(map, playerId, cooldownSeconds)
     return false, 0
 end
 
-local function isEventFlood(map, playerId, minGap)
+isEventFlood = function(map, playerId, minGap)
     local t = now()
     local last = map[playerId] or -1e9
     if (t - last) < (tonumber(minGap) or 0.05) then

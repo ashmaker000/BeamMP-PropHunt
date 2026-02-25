@@ -79,6 +79,7 @@ local spawnswapDisabledReason = nil
 local preSpawnAttemptedRound = nil
 local cleanupSweepSeconds = 15
 local seekerTabPrevention = true
+local hideNametagsInRound = true
 local seekerLockedVehId = nil
 local lastSeekerTabWarnAt = 0
 local lastLegalPlayerPos = nil
@@ -178,7 +179,7 @@ local hunterTagColor = color(255, 50, 50, 255)
 local hunterTagBack = color(0, 0, 0, 150)
 local hunterTagPos = vec3()
 
-local PH_BUILD = "Latest"
+local PH_BUILD = "2026-02-25-topcam-lock"
 
 local function onExtensionLoaded()
     print("DEBUG: PropHunt Core LOADED (" .. PH_BUILD .. ")")
@@ -554,7 +555,7 @@ end
 
 local function pulseNicknameRenderer()
     if not MPVehicleGE or not MPVehicleGE.hideNicknames then return end
-    local desired = (gameActive and playerTeam == "seeker") and true or false
+    local desired = (gameActive == true and hideNametagsInRound == true) and true or false
     pcall(function() MPVehicleGE.hideNicknames(not desired) end)
     if scheduler and scheduler.add then
         local t = 0
@@ -898,24 +899,14 @@ local function onUpdate(dt)
         end
     end
 
-    -- Deferred hard-delete (post-round): remove leftover temp entries safely after grace period.
-    if (not gameActive) and MPVehicleGE and MPVehicleGE.getVehicles then
+    -- Deferred hard-delete disabled:
+    -- deleting MPVehicleGE entries client-side races with late network packets
+    -- (coupler/state updates), causing nil-vehicle exceptions in MPVehicleGE.
+    -- We only clear pending markers now; no direct delete() calls from PropHunt.
+    if (not gameActive) then
         local nowT = os.clock()
         for svs, due in pairs(pendingHardDelete) do
             if nowT >= (due or 0) then
-                local targetVeh = nil
-                for _, veh in pairs(MPVehicleGE.getVehicles() or {}) do
-                    if tostring(veh.serverVehicleString or "") == svs then
-                        targetVeh = veh
-                        break
-                    end
-                end
-                if targetVeh and targetVeh.delete then
-                    -- Safety: never hard-delete local-owned vehicles from client cleanup.
-                    if not targetVeh.isLocal then
-                        pcall(function() targetVeh:delete("prophunt_postround_delete") end)
-                    end
-                end
                 pendingHardDelete[svs] = nil
             end
         end
@@ -967,8 +958,9 @@ local function onUpdate(dt)
         end
     end
 
-    -- Seeker TAB prevention: block switching into non-owned vehicles during active round.
-    if gameActive and playerTeam == "seeker" and seekerTabPrevention then
+    -- TAB prevention: block switching into non-owned vehicles during active round.
+    -- Applied to all roles to prevent remote-vehicle tab races / forced spawns.
+    if gameActive and seekerTabPrevention then
         local veh = be:getPlayerVehicle(0)
         if veh then
             local vid = veh:getID()
@@ -999,7 +991,7 @@ local function onUpdate(dt)
                     local t = os.clock and os.clock() or 0
                     if (t - lastSeekerTabWarnAt) > 1.5 then
                         lastSeekerTabWarnAt = t
-                        beamMessage({ msg = "Seeker TAB switch blocked", ttl = 1.2, icon = 'block' })
+                        beamMessage({ msg = "TAB switch blocked", ttl = 1.2, icon = 'block' })
                     end
                 end
             end
@@ -1057,8 +1049,9 @@ local function onUpdate(dt)
     forceSeekerBlackoutNow()
 
     -- AUTO TAUNT
-    -- Keep nametags hidden for seeker throughout the round (some builds re-enable them)
-    if gameActive and playerTeam == "seeker" and MPVehicleGE and MPVehicleGE.hideNicknames then
+    -- Keep nametags hidden for everyone throughout active rounds
+    -- (some builds/UI refreshes can re-enable them).
+    if gameActive and hideNametagsInRound and MPVehicleGE and MPVehicleGE.hideNicknames then
         MPVehicleGE.hideNicknames(true)
     end
 
@@ -1233,23 +1226,24 @@ onGameStart = function(data)
     -- Safety sweep for stale temp props from old rounds/builds.
     if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
 
-    if team == "seeker" then
-        -- Hide nametags for seekers only (apply immediately + delayed to beat BeamMP UI refresh)
-        if MPVehicleGE and MPVehicleGE.hideNicknames then
-            MPVehicleGE.hideNicknames(true)
-            if scheduler and scheduler.add then
-                local t = 0
-                scheduler.add(function(dt)
-                    t = t + dt
-                    if t > 1.0 then
-                        MPVehicleGE.hideNicknames(true)
-                        return false
-                    end
-                    return true
-                end)
-            end
+    -- Hide nametags for everyone during active rounds
+    -- (apply immediately + delayed to beat BeamMP UI refresh).
+    if hideNametagsInRound and MPVehicleGE and MPVehicleGE.hideNicknames then
+        MPVehicleGE.hideNicknames(true)
+        if scheduler and scheduler.add then
+            local t = 0
+            scheduler.add(function(dt)
+                t = t + dt
+                if t > 1.0 then
+                    MPVehicleGE.hideNicknames(true)
+                    return false
+                end
+                return true
+            end)
         end
+    end
 
+    if team == "seeker" then
         local sv = be:getPlayerVehicle(0)
         seekerLockedVehId = sv and sv:getID() or seekerLockedVehId
         beamMessage({
@@ -1264,11 +1258,6 @@ onGameStart = function(data)
             beginSeekerHidePhaseEnforcement()
         end
     else
-        -- Ensure hiders can still see nametags
-        if MPVehicleGE and MPVehicleGE.hideNicknames then
-            MPVehicleGE.hideNicknames(false)
-        end
-
         beamMessage({
             msg = "You are a HIDER! Hide and survive for 5 minutes!",
             ttl = 5,
@@ -2082,16 +2071,24 @@ onSettings = function(data)
         seekerTabPrevention = not (b == "false" or b == "0" or b == "off")
     end
 
-    -- Optional (backward-compatible): moving reset lock controls.
+    -- Optional (backward-compatible): hide nametags toggle, then moving reset controls.
     if #parts >= 11 then
         local b = tostring(parts[11] or ""):lower()
-        disableResetsWhenMoving = not (b == "false" or b == "0" or b == "off")
+        hideNametagsInRound = not (b == "false" or b == "0" or b == "off")
     end
 
     if #parts >= 12 then
-        local v = tonumber(parts[12])
+        local b = tostring(parts[12] or ""):lower()
+        disableResetsWhenMoving = not (b == "false" or b == "0" or b == "off")
+    end
+
+    if #parts >= 13 then
+        local v = tonumber(parts[13])
         if v then maxResetMovingSpeed = math.max(0, v) end
     end
+
+    -- Apply updated nametag preference immediately.
+    pulseNicknameRenderer()
 
     preSpawnIfNeeded()
 end
@@ -2254,14 +2251,17 @@ onTeamUpdate = function(data)
     if team and team ~= "" then
         playerTeam = team
         if team == "seeker" then
-            -- Ensure nametags stay hidden when you convert
-            if MPVehicleGE and MPVehicleGE.hideNicknames then
+            -- Ensure nametags stay hidden when enabled.
+            if hideNametagsInRound and MPVehicleGE and MPVehicleGE.hideNicknames then
                 MPVehicleGE.hideNicknames(true)
             end
             local sv = be:getPlayerVehicle(0)
             seekerLockedVehId = sv and sv:getID() or seekerLockedVehId
             beamMessage({ msg = "You have been CONVERTED into a SEEKER!", ttl = 4, icon = 'visibility' })
         else
+            -- Failsafe: if role switched away from seeker, force-clear seeker blackout effects.
+            setSeekerVisualBlock(false)
+            clearSeekerBlackoutFallback()
             beamMessage({ msg = "Team updated: " .. tostring(team), ttl = 3, icon = 'info' })
         end
     end
