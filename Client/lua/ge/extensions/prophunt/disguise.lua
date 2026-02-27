@@ -77,6 +77,30 @@ local function findNewVehicleId(before)
   return nil
 end
 
+
+local function countOwnedVehicles()
+  if not MPVehicleGE or not MPVehicleGE.getOwnMap then return 0 end
+  local ok, ownMap = pcall(function() return MPVehicleGE.getOwnMap() end)
+  if not ok or type(ownMap) ~= 'table' then return 0 end
+  local c = 0
+  for _, v in pairs(ownMap) do
+    if v == true then c = c + 1 end
+  end
+  return c
+end
+
+local function spawnswapGuardAllows(ctx)
+  local maxOwned = 2 -- keep one driver + one temp prop max
+  local owned = countOwnedVehicles()
+  if owned >= maxOwned then
+    if ctx and ctx.disableSpawnswapForRound then
+      pcall(function() ctx.disableSpawnswapForRound('vehicle_cap_guard') end)
+    end
+    return false
+  end
+  return true
+end
+
 local function ensureModelAndLabel(propName)
   local modelKey = propName
   local modelLabel = propName
@@ -230,8 +254,12 @@ function M.preSpawnProp(ctx, propName)
   if mode == "spawnswap" and ctx.isSpawnswapDisabledForRound and ctx.isSpawnswapDisabledForRound() then
     effectiveMode = "replace"
   end
+  if mode == "spawnswap" and not spawnswapGuardAllows(ctx) then
+    effectiveMode = "replace"
+  end
   if mode ~= "spawnswap" then return end
   if ctx.isSpawnswapDisabledForRound and ctx.isSpawnswapDisabledForRound() then return end
+  if not spawnswapGuardAllows(ctx) then return end
   if ctx.isPreSpawnAttemptedThisRound and ctx.isPreSpawnAttemptedThisRound() then return end
   if ctx.markPreSpawnAttemptedThisRound then ctx.markPreSpawnAttemptedThisRound() end
 
@@ -292,6 +320,9 @@ function M.spawnAndAttachProp(ctx, propName)
   local mode = (ctx.getDisguiseMode and tostring(ctx.getDisguiseMode() or "replace"):lower()) or "replace"
   local effectiveMode = mode
   if mode == "spawnswap" and ctx.isSpawnswapDisabledForRound and ctx.isSpawnswapDisabledForRound() then
+    effectiveMode = "replace"
+  end
+  if mode == "spawnswap" and not spawnswapGuardAllows(ctx) then
     effectiveMode = "replace"
   end
   local forceGhostOff = (ctx.getForceGhostOffOnRestore and ctx.getForceGhostOffOnRestore() ~= false) or true

@@ -24,6 +24,8 @@ M.defaults = {
   forceGhostOffOnRestore = true,
   spawnswapRetryCount = 2,
   seekerTabPrevention = true,
+  allowNodeGrabInRound = false,
+  allowHiderResetInRound = false,
 
   -- visuals
   seekerFadeDist = 120,
@@ -35,7 +37,7 @@ M.defaults = {
   joinPolicy = "lock_next_round",
 
   -- disguise pipeline: replace (stable) | preload (experimental) | spawnswap (experimental)
-  disguiseMode = "spawnswap",
+  disguiseMode = "replace",
 
   -- Next-round-only forced prop (nil => random)
   nextRoundForcedProp = nil,
@@ -88,7 +90,7 @@ M.defaults = {
     "flail", "flipramp", "fridge", "gate", "haybale", "kickplate", "logs", "marble_block",
     "mattress", "metal_box", "metal_ramp", "piano", "porta_potty", "rallyflags", "rallysigns",
     "roadsigns", "rock_pile", "rocks", "sawhorse", "shipping_container", "spikestrip",
-    "steel_coil", "trampoline", "tirewall", "trafficbarrel", "trashbin", "tub", "tube", "tv",
+    "steel_coil", "trampoline", "tirewall", "trafficbarrel", "trashbin", "tube", "tv",
     "wall", "woodcrate", "woodplanks"
   }
 }

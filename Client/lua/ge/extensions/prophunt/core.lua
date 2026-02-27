@@ -79,7 +79,10 @@ local spawnswapDisabledReason = nil
 local preSpawnAttemptedRound = nil
 local cleanupSweepSeconds = 15
 local seekerTabPrevention = true
+local allowNodeGrabInRound = false
+local allowHiderResetInRound = false
 local hideNametagsInRound = true
+local seekerSyncDelayAfterHide = 1.2
 local seekerLockedVehId = nil
 local lastSeekerTabWarnAt = 0
 local lastLegalPlayerPos = nil
@@ -118,8 +121,10 @@ local lastMovementPosReady = false
 local lastHudPulseMsgAt = 0
 local lastHudPulseKey = ""
 local postRoundCleanupUntil = 0
+local lastNametagEnforceAt = 0
 local lastPostRoundCleanupSweepAt = 0
 local pendingHardDelete = {} -- serverVehicleString -> dueTime
+local hardNametagMaskActive = false
 
 -- Round identity (server-sent) + idempotency
 local currentRoundId = nil
@@ -129,6 +134,9 @@ local allowDisguise = false
 local disguisedThisRound = false
 local disguisedRoundId = nil
 local disguiseInProgress = false
+local roundEndRestoreAppliedRound = nil
+local gameEndRestoreAppliedRound = nil
+local localEliminatedRestoreRound = nil
 local lastStateRequestAt = 0
 local hideVisualTask = nil
 local hideCameraTask = nil
@@ -163,6 +171,9 @@ local onKillcamPulse
 local onCooldownHint
 local onSpawnHint
 local onTempPropClear
+local onTempPropClearOwner
+local onForceSync
+local hardClearAllTempProps
 local cleanupTempSpawnSwapProps
 local clearTempPropByServerString
 local ensureVehicleExtensionsLoaded
@@ -214,6 +225,9 @@ local function onExtensionLoaded()
     disguisedThisRound = disguisedThisRound or false
     disguisedRoundId = disguisedRoundId or nil
     disguiseInProgress = false
+    roundEndRestoreAppliedRound = nil
+    gameEndRestoreAppliedRound = nil
+    localEliminatedRestoreRound = nil
     currentRoundId = currentRoundId or nil
     assignedPropName = assignedPropName or nil
     lastStateRequestAt = 0
@@ -259,6 +273,8 @@ local function onExtensionLoaded()
         onCooldownHint = onCooldownHint,
         onSpawnHint = onSpawnHint,
         onTempPropClear = onTempPropClear,
+        onTempPropClearOwner = onTempPropClearOwner,
+        onForceSync = onForceSync,
     })
 
     -- Prime vehicle-side hooks even before a round starts.
@@ -423,13 +439,57 @@ local function enforceHiderAbilityLock()
     local cmd = [[
       if input and input.event then
         local kill = {
-          'nodeGrabber','nodegrabber','nodegrabberGrab','nodegrabberRotate','nodegrabberTranslate',
-          'boost','jump','recover','recover_vehicle','dropPlayerAtCameraNoReset'
+          'boost','jump','dropPlayerAtCameraNoReset'
         }
         for _, a in ipairs(kill) do input.event(a, 0, 2) end
       end
     ]]
     pcall(function() veh:queueLuaCommand(cmd) end)
+    if not allowNodeGrabInRound then
+        pcall(function()
+            if input and input.event then
+                input.event('nodeGrabber', 0, 2)
+                input.event('nodegrabber', 0, 2)
+                input.event('nodegrabberGrab', 0, 2)
+                input.event('nodegrabberRotate', 0, 2)
+                input.event('nodegrabberTranslate', 0, 2)
+            end
+        end)
+    end
+    if not allowHiderResetInRound then
+        pcall(function()
+            if input and input.event then
+                input.event('recover', 0, 2)
+                input.event('recover_vehicle', 0, 2)
+                input.event('reset_physics', 0, 2)
+                input.event('reset_all_physics', 0, 2)
+            end
+        end)
+    end
+end
+
+local function getGlobalBlockedActions()
+    local list = {}
+    for _, a in ipairs(globalBlockedActions) do
+        local aa = tostring(a)
+        local isNode = (aa == "nodeGrabber" or aa == "nodegrabber" or aa == "nodegrabberGrab" or aa == "nodegrabberRotate" or aa == "nodegrabberTranslate")
+        if not (allowNodeGrabInRound and isNode) then
+            list[#list + 1] = aa
+        end
+    end
+    return list
+end
+
+local function getHiderBlockedActions()
+    local list = {}
+    for _, a in ipairs(hiderBlockedActions) do
+        local aa = tostring(a)
+        local isReset = (aa == "recover" or aa == "recover_vehicle" or aa == "recover_vehicle_alt" or aa == "reset_physics" or aa == "reset_all_physics")
+        if not (allowHiderResetInRound and isReset) then
+            list[#list + 1] = aa
+        end
+    end
+    return list
 end
 
 local function enforceActionFilters()
@@ -437,14 +497,14 @@ local function enforceActionFilters()
 
     local shouldGlobal = (gameActive == true)
     if shouldGlobal ~= actionFilterGlobalActive then
-        core_input_actionFilter.setGroup("ph_global_lock", globalBlockedActions)
+        core_input_actionFilter.setGroup("ph_global_lock", getGlobalBlockedActions())
         core_input_actionFilter.addAction(0, "ph_global_lock", shouldGlobal)
         actionFilterGlobalActive = shouldGlobal
     end
 
     local shouldHider = (gameActive == true and playerTeam == "hider")
     if shouldHider ~= actionFilterHiderActive then
-        core_input_actionFilter.setGroup("ph_hider_lock", hiderBlockedActions)
+        core_input_actionFilter.setGroup("ph_hider_lock", getHiderBlockedActions())
         core_input_actionFilter.addAction(0, "ph_hider_lock", shouldHider)
         actionFilterHiderActive = shouldHider
     end
@@ -458,7 +518,7 @@ local function enforceGlobalCheatKeyLock()
         input.event('toggleFreeCamera', 0, 2)
         input.event('dropPlayerAtCamera', 0, 2)
         input.event('dropPlayerAtCameraNoReset', 0, 2)
-        input.event('nodeGrabber', 0, 2)
+        if not allowNodeGrabInRound then input.event('nodeGrabber', 0, 2) end
       end
     end)
 end
@@ -553,9 +613,93 @@ local function queueHardDelete(serverVeh, delaySec)
     pendingHardDelete[sv] = os.clock() + (tonumber(delaySec) or 2.5)
 end
 
+local function enforceNametagHardMask(enabled)
+    if not MPVehicleGE then return end
+
+    -- Player-level mask (hides all roles/prefix/suffix labels like Dev/CC too)
+    if MPVehicleGE.getPlayers then
+        for _, p in pairs(MPVehicleGE.getPlayers() or {}) do
+            if type(p) == "table" then
+                p.hideNametag = (enabled == true)
+                if enabled == true then
+                    p.name = ""
+                    p.playerName = ""
+                    p.nickname = ""
+                    p.ownerName = ""
+                    p.shortname = ""
+                    p.nickPrefixes = {}
+                    p.nickSuffixes = {}
+                    if p.role then
+                        p.role.name = ""
+                        p.role.tag = ""
+                        p.role.shorttag = ""
+                    end
+                    pcall(function() if p.setDisplayName then p:setDisplayName("") end end)
+                    pcall(function() if p.clearCustomRole then p:clearCustomRole() end end)
+                end
+            end
+        end
+    end
+
+    -- Vehicle-level mask as backup
+    if MPVehicleGE.getVehicles then
+        for _, v in pairs(MPVehicleGE.getVehicles() or {}) do
+            if type(v) == "table" then
+                v.hideNametag = (enabled == true)
+                if enabled == true then
+                    v.ownerName = ""
+                    v.nickname = ""
+                    v.shortname = ""
+                    v.nickPrefixes = {}
+                    v.nickSuffixes = {}
+                    if v.role then
+                        v.role.name = ""
+                        v.role.tag = ""
+                        v.role.shorttag = ""
+                    end
+                    pcall(function() if v.setDisplayName then v:setDisplayName("") end end)
+                    pcall(function() if v.clearCustomRole then v:clearCustomRole() end end)
+                end
+            end
+        end
+    end
+
+    hardNametagMaskActive = (enabled == true)
+end
+
+
+local function scrubTempVehicleNameMetadata()
+    if not MPVehicleGE or not MPVehicleGE.getVehicles then return end
+    for _, veh in pairs(MPVehicleGE.getVehicles() or {}) do
+        local svs = tostring(veh.serverVehicleString or "")
+        local _, idxStr = string.match(svs, "^(%d+)%-(%d+)$")
+        local idx = tonumber(idxStr)
+        if idx and idx > 0 then
+            veh.hideNametag = true
+            veh.ownerName = ""
+            veh.nickname = ""
+            veh.shortname = ""
+            veh.nickPrefixes = {}
+            veh.nickSuffixes = {}
+            if veh.role then
+                veh.role.name = ""
+                veh.role.tag = ""
+                veh.role.shorttag = ""
+            end
+            pcall(function() if veh.setDisplayName then veh:setDisplayName("") end end)
+            pcall(function() if veh.clearCustomRole then veh:clearCustomRole() end end)
+        end
+    end
+end
+
+local function shouldApplyNametagMaskNow()
+    -- Nametag masking disabled per server/user decision; keep BeamMP defaults visible.
+    return false
+end
+
 local function pulseNicknameRenderer()
     if not MPVehicleGE or not MPVehicleGE.hideNicknames then return end
-    local desired = (gameActive == true and hideNametagsInRound == true) and true or false
+    local desired = shouldApplyNametagMaskNow() and true or false
     pcall(function() MPVehicleGE.hideNicknames(not desired) end)
     if scheduler and scheduler.add then
         local t = 0
@@ -563,12 +707,14 @@ local function pulseNicknameRenderer()
             t = t + (dt or 0)
             if t >= 0.15 then
                 pcall(function() MPVehicleGE.hideNicknames(desired) end)
+                enforceNametagHardMask(desired)
                 return false
             end
             return true
         end)
     else
         pcall(function() MPVehicleGE.hideNicknames(desired) end)
+        enforceNametagHardMask(desired)
     end
 end
 
@@ -890,10 +1036,27 @@ local function onUpdate(dt)
         enforceHiderAbilityLock()
     end
 
+    -- Keep nametag suppression sticky even when MPVehicleGE updates vehicle data mid-round.
+    local nowMask = os.clock()
+    if (nowMask - (lastNametagEnforceAt or 0)) >= 0.5 then
+        lastNametagEnforceAt = nowMask
+        local desiredMask = shouldApplyNametagMaskNow()
+        enforceNametagHardMask(desiredMask)
+        if MPVehicleGE and MPVehicleGE.hideNicknames then
+            if desiredMask then
+                pcall(function() MPVehicleGE.hideNicknames(true) end)
+                scrubTempVehicleNameMetadata()
+            else
+                pcall(function() MPVehicleGE.hideNicknames(false) end)
+            end
+        end
+    end
+
     -- Post-round safety sweep: for a short window after round/game end,
     -- repeatedly dedupe owner vehicles to kill late stale nametags.
     if (not gameActive) and postRoundCleanupUntil and os.clock() < postRoundCleanupUntil then
         if (os.clock() - (lastPostRoundCleanupSweepAt or 0)) >= 1.0 then
+            hardClearAllTempProps()
             if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
             lastPostRoundCleanupSweepAt = os.clock()
         end
@@ -1051,8 +1214,11 @@ local function onUpdate(dt)
     -- AUTO TAUNT
     -- Keep nametags hidden for everyone throughout active rounds
     -- (some builds/UI refreshes can re-enable them).
-    if gameActive and hideNametagsInRound and MPVehicleGE and MPVehicleGE.hideNicknames then
+    if shouldApplyNametagMaskNow() and MPVehicleGE and MPVehicleGE.hideNicknames then
         MPVehicleGE.hideNicknames(true)
+        enforceNametagHardMask(true)
+    elseif hardNametagMaskActive then
+        enforceNametagHardMask(false)
     end
 
     -- Auto-taunt disabled by default (it can sound like an auto horn).
@@ -1204,6 +1370,9 @@ onGameStart = function(data)
         return
     end
     lastHandledGameStartRound = roundId
+    roundEndRestoreAppliedRound = nil
+    gameEndRestoreAppliedRound = nil
+    localEliminatedRestoreRound = nil
 
     resetRoundState(roundId)
 
@@ -1228,7 +1397,7 @@ onGameStart = function(data)
 
     -- Hide nametags for everyone during active rounds
     -- (apply immediately + delayed to beat BeamMP UI refresh).
-    if hideNametagsInRound and MPVehicleGE and MPVehicleGE.hideNicknames then
+    if shouldApplyNametagMaskNow() and MPVehicleGE and MPVehicleGE.hideNicknames then
         MPVehicleGE.hideNicknames(true)
         if scheduler and scheduler.add then
             local t = 0
@@ -1275,8 +1444,10 @@ onGameEnd = function(data)
     -- data may contain a reason/winner string from server (timeout/seekers/manual/etc)
     local reason = tostring(data or "")
 
-    -- Safety: if round-end restore was missed due to event ordering, force one here.
-    if preDisguiseModelKey and core_vehicles and core_vehicles.replaceVehicle then
+    -- Safety: if round-end restore was missed due to event ordering, force one here once per round.
+    if currentRoundId and (gameEndRestoreAppliedRound == currentRoundId or roundEndRestoreAppliedRound == currentRoundId or localEliminatedRestoreRound == currentRoundId) then
+        -- already restored for this round end sequence
+    elseif preDisguiseModelKey and core_vehicles and core_vehicles.replaceVehicle then
         local okRep, errRep = pcall(function()
             if preDisguiseConfig and preDisguiseConfig ~= '' then
                 core_vehicles.replaceVehicle(preDisguiseModelKey, { config = preDisguiseConfig })
@@ -1289,6 +1460,7 @@ onGameEnd = function(data)
         else
             print("WARN: game-end forced restore failed: " .. tostring(errRep))
         end
+        if currentRoundId then gameEndRestoreAppliedRound = currentRoundId end
     end
 
     playerTeam = nil
@@ -1598,36 +1770,50 @@ onHidePhaseEnd = function(data)
 
     -- Unfreeze seeker's vehicle when hide phase ends
     if playerTeam == "seeker" then
-        local playerVeh = be:getPlayerVehicle(0)
-        if playerVeh then
-            core_vehicleBridge.executeAction(playerVeh, 'setFreeze', false)
-            print("DEBUG: Seeker vehicle unfrozen - hunt begins!")
-        end
-
-        setSeekerVisualBlock(false)
-        clearSeekerBlackoutFallback()
-        applyHideCameraLock(false)
-        if hideVisualTask then
-            hideVisualTask = nil
-        end
-        if hideCameraTask then
-            hideCameraTask = nil
-        end
-
-        -- Return camera to orbit when round starts (nice default)
-        pcall(function()
-            if commands and commands.setGameCamera then
-                commands.setGameCamera('orbit')
-            elseif core_camera and core_camera.setByName then
-                core_camera.setByName('orbit')
+        local function releaseSeekerForHunt()
+            local playerVeh = be:getPlayerVehicle(0)
+            if playerVeh then
+                core_vehicleBridge.executeAction(playerVeh, 'setFreeze', false)
+                print("DEBUG: Seeker vehicle unfrozen - hunt begins!")
             end
-        end)
 
-        beamMessage({
-            msg = "Hunt begins NOW!",
-            ttl = 3,
-            icon = 'visibility'
-        })
+            setSeekerVisualBlock(false)
+            clearSeekerBlackoutFallback()
+            applyHideCameraLock(false)
+            if hideVisualTask then hideVisualTask = nil end
+            if hideCameraTask then hideCameraTask = nil end
+
+            -- Return camera to orbit when round starts (nice default)
+            pcall(function()
+                if commands and commands.setGameCamera then
+                    commands.setGameCamera('orbit')
+                elseif core_camera and core_camera.setByName then
+                    core_camera.setByName('orbit')
+                end
+            end)
+
+            beamMessage({ msg = "Hunt begins NOW!", ttl = 3, icon = 'visibility' })
+        end
+
+        local syncDelay = tonumber(seekerSyncDelayAfterHide or 0) or 0
+        if syncDelay > 0 and scheduler and scheduler.add then
+            beamMessage({ msg = string.format("Synchronizing hiders... (%.1fs)", syncDelay), ttl = math.max(1.0, syncDelay), icon = 'sync' })
+            local t = 0
+            scheduler.add(function(dt)
+                t = t + (dt or 0)
+                local pv = be:getPlayerVehicle(0)
+                if pv and core_vehicleBridge and core_vehicleBridge.executeAction then
+                    core_vehicleBridge.executeAction(pv, 'setFreeze', true)
+                end
+                if t >= syncDelay then
+                    releaseSeekerForHunt()
+                    return false
+                end
+                return true
+            end)
+        else
+            releaseSeekerForHunt()
+        end
     else
         -- Hiders: now transform into prop
         if assignedPropName and assignedPropName ~= "" then
@@ -1638,6 +1824,22 @@ onHidePhaseEnd = function(data)
                 propStateRequestedRound = roundId
                 print("[PH] Requesting prop state for round " .. tostring(roundId))
                 TriggerServerEvent("PropHunt_requestState", "")
+                if scheduler and scheduler.add then
+                    local delays = {0.4, 1.0, 2.0}
+                    for _, delay in ipairs(delays) do
+                        local t = 0
+                        scheduler.add(function(dt)
+                            t = t + (dt or 0)
+                            if t >= delay then
+                                if playerTeam == "hider" and allowDisguise and (not assignedPropName or assignedPropName == "") then
+                                    TriggerServerEvent("PropHunt_requestState", "")
+                                end
+                                return false
+                            end
+                            return true
+                        end)
+                    end
+                end
             end
         end
 
@@ -1737,6 +1939,7 @@ onPlayerEliminated = function(data)
                         cleanupTempSpawnSwapProps()
                     end
 
+                    if currentRoundId then localEliminatedRestoreRound = currentRoundId end
                     beamMessage({ msg = "You were found! Back to your car (eliminated).", ttl = 4, icon = 'directions_car' })
 
                 else
@@ -1750,6 +1953,7 @@ onPlayerEliminated = function(data)
                             end
                         end)
                         if okRep then
+                            if currentRoundId then localEliminatedRestoreRound = currentRoundId end
                             beamMessage({ msg = "You were found! Reverting to car.", ttl = 4, icon = 'directions_car' })
                         else
                             print("WARN: replace fallback revert failed: " .. tostring(errRep))
@@ -1767,8 +1971,10 @@ onRoundEnd = function(data)
     -- data can contain a reason string from the server
     local reason = tostring(data or "")
 
+    local skipRestore = (currentRoundId and localEliminatedRestoreRound == currentRoundId)
+
     -- Best-effort: restore original vehicle for hiders (spawn+deactivate disguise)
-    if originalVehId and be:getObjectByID(originalVehId) then
+    if (not skipRestore) and originalVehId and be:getObjectByID(originalVehId) then
         local ov = be:getObjectByID(originalVehId)
         local curVeh = be:getPlayerVehicle(0)
         local curPos = curVeh and curVeh.getPosition and curVeh:getPosition() or nil
@@ -1810,8 +2016,10 @@ onRoundEnd = function(data)
         end
     end
 
-    -- Hard safety: in replace/fallback paths, force-restore local hider vehicle model.
-    if playerTeam == "hider" and preDisguiseModelKey and core_vehicles and core_vehicles.replaceVehicle then
+    -- Hard safety: in replace/fallback paths, force-restore local hider vehicle model once per round.
+    if currentRoundId and roundEndRestoreAppliedRound == currentRoundId then
+        -- duplicate round-end event; skip repeat restore
+    elseif playerTeam == "hider" and preDisguiseModelKey and core_vehicles and core_vehicles.replaceVehicle then
         local function doRestoreReplace()
             local okRep, errRep = pcall(function()
                 if preDisguiseConfig and preDisguiseConfig ~= '' then
@@ -1828,17 +2036,7 @@ onRoundEnd = function(data)
         end
 
         doRestoreReplace()
-        if scheduler and scheduler.add then
-            local t = 0
-            scheduler.add(function(dt)
-                t = t + (dt or 0)
-                if t >= 0.25 then
-                    doRestoreReplace()
-                    return false
-                end
-                return true
-            end)
-        end
+        if currentRoundId then roundEndRestoreAppliedRound = currentRoundId end
     end
 
     if propVehId and be:getObjectByID(propVehId) then
@@ -1887,6 +2085,11 @@ onRoundEnd = function(data)
     pulseNicknameRenderer()
     postRoundCleanupUntil = os.clock() + 10.0
     lastPostRoundCleanupSweepAt = 0
+
+    if currentRoundId then
+        roundEndRestoreAppliedRound = currentRoundId
+        gameEndRestoreAppliedRound = currentRoundId
+    end
 
     assignedPropName = nil
     originalVehId = nil
@@ -2087,6 +2290,16 @@ onSettings = function(data)
         if v then maxResetMovingSpeed = math.max(0, v) end
     end
 
+    if #parts >= 14 then
+        local b = tostring(parts[14] or ""):lower()
+        allowNodeGrabInRound = (b == "true" or b == "1" or b == "on")
+    end
+
+    if #parts >= 15 then
+        local b = tostring(parts[15] or ""):lower()
+        allowHiderResetInRound = (b == "true" or b == "1" or b == "on")
+    end
+
     -- Apply updated nametag preference immediately.
     pulseNicknameRenderer()
 
@@ -2192,24 +2405,6 @@ clearTempPropByServerString = function(targetServerVeh)
                     shouldNotifyServerVehicleRemoved = true
                 end
 
-                -- Scrub any remaining display-name data to prevent lingering nametags.
-                veh.ownerName = ""
-                veh.nickname = ""
-                pcall(function()
-                    if veh.setDisplayName then veh:setDisplayName("") end
-                end)
-                pcall(function()
-                    if veh.clearCustomRole then veh:clearCustomRole() end
-                end)
-
-                veh.shortname = ""
-                veh.nickPrefixes = {}
-                veh.nickSuffixes = {}
-                if veh.role then
-                    veh.role.name = ""
-                    veh.role.tag = ""
-                    veh.role.shorttag = ""
-                end
             end
         end
     end
@@ -2242,7 +2437,57 @@ onTempPropClear = function(data)
     pulseNicknameRenderer()
 end
 
--- owner-wide temp prop cleanup disabled (unsafe)
+onTempPropClearOwner = function(data)
+    local ownerPid = tonumber(data)
+    if not ownerPid then return end
+    clearTempPropsForOwnerPid(ownerPid)
+    pulseNicknameRenderer()
+end
+
+
+local function isCurrentControlledServerVehString(svs)
+    if not svs or svs == "" then return false end
+    local pv = be and be:getPlayerVehicle(0) or nil
+    if not pv then return false end
+    local pvid = pv:getID()
+    if not pvid then return false end
+
+    if MPVehicleGE and MPVehicleGE.getServerVehicleID then
+        local ok, cur = pcall(function() return MPVehicleGE.getServerVehicleID(pvid) end)
+        if ok and cur and tostring(cur) == tostring(svs) then
+            return true
+        end
+    end
+
+    if MPVehicleGE and MPVehicleGE.getVehicles then
+        for _, v in pairs(MPVehicleGE.getVehicles() or {}) do
+            if tonumber(v and v.gameVehicleID) == tonumber(pvid) then
+                return tostring(v.serverVehicleString or "") == tostring(svs)
+            end
+        end
+    end
+
+    return false
+end
+
+
+onForceSync = function(data)
+    -- data: "roundId,reason" (reason currently hide_end)
+    local ridStr, why = tostring(data or ""):match("^%s*(%d+)%s*,%s*([^,]+)%s*$")
+    local rid = tonumber(ridStr)
+    if rid then currentRoundId = rid end
+
+    -- IMPORTANT: only seekers perform forced sync burst at hide-end.
+    -- Running this on hiders can trigger repeated state/edit churn and short freezes.
+    if playerTeam == "seeker" then
+        requestStateBurst()
+        if TriggerServerEvent then
+            pcall(function() TriggerServerEvent("PropHunt_requestState", "") end)
+        end
+    end
+
+    print("[PH] force sync processed team=" .. tostring(playerTeam or "nil") .. " reason=" .. tostring(why or ""))
+end
 
 onTeamUpdate = function(data)
     -- data: "roundId,team"
@@ -2252,7 +2497,7 @@ onTeamUpdate = function(data)
         playerTeam = team
         if team == "seeker" then
             -- Ensure nametags stay hidden when enabled.
-            if hideNametagsInRound and MPVehicleGE and MPVehicleGE.hideNicknames then
+            if shouldApplyNametagMaskNow() and MPVehicleGE and MPVehicleGE.hideNicknames then
                 MPVehicleGE.hideNicknames(true)
             end
             local sv = be:getPlayerVehicle(0)
@@ -2265,6 +2510,25 @@ onTeamUpdate = function(data)
             beamMessage({ msg = "Team updated: " .. tostring(team), ttl = 3, icon = 'info' })
         end
     end
+end
+
+hardClearAllTempProps = function()
+    if not MPVehicleGE or not MPVehicleGE.getVehicles then return end
+    local cleared = 0
+    for _, veh in pairs(MPVehicleGE.getVehicles() or {}) do
+        local svs = tostring(veh.serverVehicleString or "")
+        local pidStr, idxStr = string.match(svs, "^(%d+)%-(%d+)$")
+        local pid = tonumber(pidStr)
+        local idx = tonumber(idxStr)
+        local isTemp = (pidStr and idx and idx > 0)
+        if isTemp and not isCurrentControlledServerVehString(svs) then
+            print('[PH] hard clear temp prop ' .. tostring(svs))
+            clearTempPropByServerString(svs)
+            cleared = cleared + 1
+        end
+    end
+    if cleared > 0 then print('[PH] hard clear temp props count=' .. tostring(cleared)) end
+    pulseNicknameRenderer()
 end
 
 cleanupTempSpawnSwapProps = function()
@@ -2292,12 +2556,11 @@ cleanupTempSpawnSwapProps = function()
         local changed = false
         for _, list in pairs(byOwner) do
             for _, v in ipairs(list) do
-                if (tonumber(v.idx) or -1) > 0 then
-                    -- Safety: do not client-delete local-owned temporary vehicles.
-                    if not v.isLocal then
-                        clearTempPropByServerString(v.svs)
-                        changed = true
-                    end
+                local vidx = tonumber(v.idx) or -1
+                local vpid = tonumber((tostring(v.svs):match("^(%d+)%-")))
+                if vidx > 0 and not isCurrentControlledServerVehString(v.svs) then
+                    clearTempPropByServerString(v.svs)
+                    changed = true
                 end
             end
         end

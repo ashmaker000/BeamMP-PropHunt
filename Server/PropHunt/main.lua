@@ -43,6 +43,8 @@ do
             forceGhostOffOnRestore = true,
             spawnswapRetryCount = 2,
             seekerTabPrevention = true,
+            allowNodeGrabInRound = false,
+            allowHiderResetInRound = false,
             hideNametagsInRound = true,
             seekerFadeDist = 120,
             seekerFilterIntensity = 1.0,
@@ -75,6 +77,8 @@ if config.cleanupSweepSeconds == nil then config.cleanupSweepSeconds = tonumber(
 if config.spawnswapRetryCount == nil then config.spawnswapRetryCount = 2 end
 if config.allowSoloTest == nil then config.allowSoloTest = false end
 if config.seekerTabPrevention == nil then config.seekerTabPrevention = true end
+if config.allowNodeGrabInRound == nil then config.allowNodeGrabInRound = false end
+if config.allowHiderResetInRound == nil then config.allowHiderResetInRound = false end
 if config.hideNametagsInRound == nil then config.hideNametagsInRound = true end
 if config.adminAclEnabled == nil then config.adminAclEnabled = false end
 if config.adminIds == nil then config.adminIds = {} end
@@ -91,6 +95,11 @@ if config.mapProfiles == nil then config.mapProfiles = {} end
 if config.spawnBanks == nil then config.spawnBanks = {} end
 if config.propTierMode == nil then config.propTierMode = "all" end
 if config.perksEnabled == nil then config.perksEnabled = true end
+
+if tostring(config.disguiseMode or ""):lower() == "spawnswap" then
+    print("PropHunt WARN: disguisemode=spawnswap is deprecated/disabled; forcing replace")
+    config.disguiseMode = "replace"
+end
 
 local function isValidProp(key)
     for _, v in ipairs(config.propPool) do
@@ -432,6 +441,8 @@ local function formatSettingsPayload()
         .. "," .. tostring(math.max(1, tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15))
         .. "," .. tostring(config.seekerTabPrevention ~= false)
         .. "," .. tostring(config.hideNametagsInRound ~= false)
+        .. "," .. tostring(config.allowNodeGrabInRound == true)
+        .. "," .. tostring(config.allowHiderResetInRound == true)
 end
 
 local function pushSettingsToClient(playerId)
@@ -443,6 +454,37 @@ local function broadcastSettings()
     pushSettingsToClient(-1)
 end
 
+
+local function tryServerRemoveVehicle(serverVeh)
+    local sv = tostring(serverVeh or "")
+    local pidStr, vidStr = sv:match("^(%d+)%-(%d+)$")
+    local pid = tonumber(pidStr)
+    local vid = tonumber(vidStr)
+    if not pid or vid == nil then return false, "bad_id" end
+
+    -- BeamMP API differs across builds; try known variants defensively.
+    local ok = false
+    local why = "no_api"
+
+    if MP and type(MP.RemoveVehicle) == "function" then
+        local a = pcall(MP.RemoveVehicle, pid, vid)
+        if a then return true, "MP.RemoveVehicle(pid,vid)" end
+        local b = pcall(MP.RemoveVehicle, sv)
+        if b then return true, "MP.RemoveVehicle(sv)" end
+        why = "MP.RemoveVehicle_failed"
+    end
+
+    if MP and type(MP.DeleteVehicle) == "function" then
+        local a = pcall(MP.DeleteVehicle, pid, vid)
+        if a then return true, "MP.DeleteVehicle(pid,vid)" end
+        local b = pcall(MP.DeleteVehicle, sv)
+        if b then return true, "MP.DeleteVehicle(sv)" end
+        why = "MP.DeleteVehicle_failed"
+    end
+
+    return ok, why
+end
+
 local function clearTempPropsForPlayer(pid, reason)
     local set = gameState.tempProps and gameState.tempProps[pid]
     if type(set) ~= "table" then
@@ -452,8 +494,24 @@ local function clearTempPropsForPlayer(pid, reason)
     for serverVeh, _ in pairs(set) do
         if serverVeh and serverVeh ~= "" then
             MP.TriggerClientEvent(-1, "PropHunt_tempPropClear", tostring(serverVeh))
+            MP.TriggerClientEvent(-1, "PropHunt_tempPropClearOwner", tostring(pid))
+
+            local destructiveReasons = {
+                round_end = true,
+                manual = true,
+                disconnect = true,
+                stale = true,
+                timeout = true,
+                hiders = true,
+                seekers = true,
+            }
+            local allowServerDelete = destructiveReasons[tostring(reason or "")] == true
+            local removed, how = false, "skip_non_destructive_reason"
+            if allowServerDelete then
+                removed, how = tryServerRemoveVehicle(serverVeh)
+            end
             if config.debug then
-                print(string.format("PropHunt temp-prop cleanup: pid=%s veh=%s reason=%s", tostring(pid), tostring(serverVeh), tostring(reason or "clear")))
+                print(string.format("PropHunt temp-prop cleanup: pid=%s veh=%s reason=%s removed=%s via=%s", tostring(pid), tostring(serverVeh), tostring(reason or "clear"), tostring(removed), tostring(how)))
             end
         end
     end
@@ -519,8 +577,8 @@ local function PropHunt_StopGameInternal(reason)
     local reasonLabel = tostring(reason or "unknown")
     broadcast(string.format("Summary: Winner=%s | Reason=%s | Preset=%s | Duration=%02d:%02d | Tags=%d | Eliminations=%d | Conversions=%d | AliveHiders=%d",
         winner,
-        tostring(config.currentPreset or "custom"),
         reasonLabel,
+        tostring(config.currentPreset or "custom"),
         mins,
         secs,
         tonumber(gameState.roundTags or 0),
@@ -770,6 +828,10 @@ function PropHunt_onTick()
         if gameState.hideTimer <= 0 then
             -- transition to main round
             gameState.phase = "round"
+
+            -- Force clients to sync/queue latest round state at hide-end.
+            MP.TriggerClientEvent(-1, "PropHunt_ForceSync", tostring(gameState.roundId) .. ",hide_end")
+
             MP.TriggerClientEvent(-1, "PropHunt_HidePhaseEnd", tostring(gameState.roundId))
             MP.TriggerClientEvent(-1, "PropHunt_RoundStart", tostring(gameState.roundId))
             broadcast("Hunt begins NOW!")
@@ -852,9 +914,10 @@ local function showStatus(playerId)
     send(playerId, string.format("Timers: hide=%ds round=%ds", tonumber(gameState.hideTimer or 0), tonumber(gameState.roundTimer or 0)))
     send(playerId, string.format("Config: mode=%s seekerMode=%s seekerCount=%s seekerRatio=%s", tostring(config.mode), tostring(config.seekerMode), tostring(config.seekerCount), tostring(config.seekerRatio)))
     send(playerId, string.format("Config: hideTime=%ds roundTime=%ds joinPolicy=%s disguiseMode=%s forcedProp=%s", tonumber(config.hideTime or 60), tonumber(config.roundTime or 300), tostring(config.joinPolicy or "lock_next_round"), tostring(config.disguiseMode or "replace"), tostring(config.nextRoundForcedProp or "random")))
+    send(playerId, "Note: disguisemode=spawnswap is deprecated/disabled.")
     send(playerId, string.format("Profiles: preset=%s map=%s propTierMode=%s perks=%s", tostring(config.currentPreset or "custom"), tostring(gameState.currentMapKey or "unknown"), tostring(config.propTierMode or "all"), tostring(config.perksEnabled == true)))
     send(playerId, string.format("Visuals: seekerFade=%.1f seekerIntensity=%.2f hiderFade=%.1f hiderIntensity=%.2f", tonumber(config.seekerFadeDist or 120), tonumber(config.seekerFilterIntensity or 1), tonumber(config.hiderFadeDist or 120), tonumber(config.hiderFilterIntensity or 0.35)))
-    send(playerId, string.format("Stability: forceGhostOffOnRestore=%s cleanupSweepSeconds=%s spawnswapRetryCount=%s seekerTabPrevention=%s hideNametagsInRound=%s", tostring(config.forceGhostOffOnRestore ~= false), tostring(tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15), tostring(tonumber(config.spawnswapRetryCount or 1) or 1), tostring(config.seekerTabPrevention ~= false), tostring(config.hideNametagsInRound ~= false)))
+    send(playerId, string.format("Stability: forceGhostOffOnRestore=%s cleanupSweepSeconds=%s spawnswapRetryCount=%s seekerTabPrevention=%s hideNametagsInRound=%s nodeGrab=%s hiderReset=%s", tostring(config.forceGhostOffOnRestore ~= false), tostring(tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15), tostring(tonumber(config.spawnswapRetryCount or 1) or 1), tostring(config.seekerTabPrevention ~= false), tostring(config.hideNametagsInRound ~= false), tostring(config.allowNodeGrabInRound == true), tostring(config.allowHiderResetInRound == true)))
 end
 
 local function showHelp(playerId)
@@ -874,7 +937,7 @@ local function showHelp(playerId)
     send(playerId, "  /ph set roundtime <seconds> - Round length")
     send(playerId, "  /ph set mode classic|tag - Tagging behavior")
     send(playerId, "  /ph set joinpolicy lock_next_round|spectator|seeker|hider")
-    send(playerId, "  /ph set disguisemode replace|preload|spawnswap")
+    send(playerId, "  /ph set disguisemode replace|preload")
     send(playerId, "  /ph set forceghostoff <on|off>")
     send(playerId, "  /ph set cleanupsweep <seconds>")
     send(playerId, "  /ph set spawnswapretry <n>")
@@ -1209,8 +1272,12 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             return 1
         elseif key == "disguisemode" then
             local d = tostring(words[3] or ""):lower()
-            if d ~= "replace" and d ~= "preload" and d ~= "spawnswap" then
-                send(playerId, "Usage: /phset disguisemode replace|preload|spawnswap")
+            if d == "spawnswap" then
+                send(playerId, "spawnswap mode is disabled/deprecated due to unresolved nametag leaks. Use replace or preload.")
+                return 1
+            end
+            if d ~= "replace" and d ~= "preload" then
+                send(playerId, "Usage: /phset disguisemode replace|preload")
                 return 1
             end
             config.disguiseMode = d
@@ -1267,6 +1334,26 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             -- Human-friendly: nametags off => hide tags during round.
             config.hideNametagsInRound = (v == "off")
             broadcast("hideNametagsInRound=" .. tostring(config.hideNametagsInRound) .. " (nametags " .. v .. ")")
+            broadcastSettings()
+            return 1
+        elseif key == "nodegrab" then
+            local v = tostring(words[3] or ""):lower()
+            if v ~= "on" and v ~= "off" then
+                send(playerId, "Usage: /phset nodegrab <on|off>")
+                return 1
+            end
+            config.allowNodeGrabInRound = (v == "on")
+            broadcast("allowNodeGrabInRound=" .. tostring(config.allowNodeGrabInRound))
+            broadcastSettings()
+            return 1
+        elseif key == "hiderreset" then
+            local v = tostring(words[3] or ""):lower()
+            if v ~= "on" and v ~= "off" then
+                send(playerId, "Usage: /phset hiderreset <on|off>")
+                return 1
+            end
+            config.allowHiderResetInRound = (v == "on")
+            broadcast("allowHiderResetInRound=" .. tostring(config.allowHiderResetInRound))
             broadcastSettings()
             return 1
         elseif key == "seekerfadedist" then
@@ -1404,6 +1491,19 @@ function PropHunt_tempPropSet(playerId, data)
     if rid and ((not gameState.active) or rid ~= tonumber(gameState.roundId or -1)) then
         if config.debug then
             print(string.format("PropHunt temp-prop ignore stale report: pid=%s rid=%s current=%s veh=%s", tostring(playerId), tostring(rid), tostring(gameState.roundId), tostring(serverVeh)))
+        end
+        return
+    end
+
+    local ownerPidStr, idxStr = serverVeh:match("^(%d+)%-(%d+)$")
+    local ownerPid = tonumber(ownerPidStr)
+    local idx = tonumber(idxStr)
+    -- Security/consistency: only track true temp spawn-swap entries (idx > 0)
+    -- and only when owned by reporting player.
+    if (not ownerPid) or (not idx) or idx <= 0 then return end
+    if tonumber(ownerPid) ~= tonumber(playerId) then
+        if config.debug then
+            print(string.format("PropHunt temp-prop ignore owner mismatch: reporter=%s owner=%s veh=%s", tostring(playerId), tostring(ownerPid), tostring(serverVeh)))
         end
         return
     end

@@ -62,7 +62,11 @@ function M.register(handlers)
   print("DEBUG: Registered handler for PropHunt_SpawnHint")
   AddEventHandler("PropHunt_tempPropClear", handlers.onTempPropClear)
   print("DEBUG: Registered handler for PropHunt_tempPropClear")
-  -- tempPropClearOwner disabled (unsafe over-broad cleanup)
+  AddEventHandler("PropHunt_tempPropClearOwner", handlers.onTempPropClearOwner)
+  print("DEBUG: Registered handler for PropHunt_tempPropClearOwner")
+
+  AddEventHandler("PropHunt_ForceSync", handlers.onForceSync)
+  print("DEBUG: Registered handler for PropHunt_ForceSync")
 
   isRegistered = true
   return true
