@@ -83,6 +83,11 @@ M.defaults = {
   -- economy / perks
   perksEnabled = true,
 
+  -- optional auto-start while idle
+  autorunEnabled = false,
+  autorunIntervalSeconds = 600,
+  autorunMinPlayers = 2, -- starts when connected players > this value
+
   -- Prop pool (official internal names)
   propPool = {
     "anticut", "barrels", "ball", "barrier", "barrier_plastic", "blockwall", "bollard",

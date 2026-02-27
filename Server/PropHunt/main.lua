@@ -66,7 +66,10 @@ do
             currentPreset = "casual",
             mapProfiles = { west_coast_usa = "ranked", utah = "casual" },
             propTierMode = "all",
-            perksEnabled = true
+            perksEnabled = true,
+            autorunEnabled = false,
+            autorunIntervalSeconds = 600,
+            autorunMinPlayers = 2
         }
     end
 end
@@ -95,6 +98,9 @@ if config.mapProfiles == nil then config.mapProfiles = {} end
 if config.spawnBanks == nil then config.spawnBanks = {} end
 if config.propTierMode == nil then config.propTierMode = "all" end
 if config.perksEnabled == nil then config.perksEnabled = true end
+if config.autorunEnabled == nil then config.autorunEnabled = false end
+if config.autorunIntervalSeconds == nil then config.autorunIntervalSeconds = 600 end
+if config.autorunMinPlayers == nil then config.autorunMinPlayers = 2 end
 
 if tostring(config.disguiseMode or ""):lower() == "spawnswap" then
     print("PropHunt WARN: disguisemode=spawnswap is deprecated/disabled; forcing replace")
@@ -319,7 +325,8 @@ gameState = {
     roundEliminations = 0,
     roundConversions = 0,
     economy = {}, -- playerID -> {points=0, perks={...}}
-    currentMapKey = "unknown"
+    currentMapKey = "unknown",
+    lastAutoStartAt = 0
 }
 
 local function now()
@@ -799,7 +806,23 @@ end
 -- MAIN TICK
 -- ============================
 function PropHunt_onTick()
-    if not gameState.active then return end
+    if not gameState.active then
+        if config.autorunEnabled == true then
+            local tNow = now()
+            local interval = math.max(60, tonumber(config.autorunIntervalSeconds or 600) or 600)
+            local threshold = math.max(0, math.floor(tonumber(config.autorunMinPlayers or 2) or 2))
+            local playerCount = 0
+            for pid, _ in pairs(MP.GetPlayers() or {}) do
+                if pid then playerCount = playerCount + 1 end
+            end
+            if playerCount > threshold and (tNow - tonumber(gameState.lastAutoStartAt or 0)) >= interval then
+                gameState.lastAutoStartAt = tNow
+                broadcast(string.format("Autorun: starting round (%d players > %d)", playerCount, threshold))
+                PropHunt_StartGame()
+            end
+        end
+        return
+    end
 
     local tNow = now()
     local sweepEvery = tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15
@@ -918,6 +941,7 @@ local function showStatus(playerId)
     send(playerId, string.format("Profiles: preset=%s map=%s propTierMode=%s perks=%s", tostring(config.currentPreset or "custom"), tostring(gameState.currentMapKey or "unknown"), tostring(config.propTierMode or "all"), tostring(config.perksEnabled == true)))
     send(playerId, string.format("Visuals: seekerFade=%.1f seekerIntensity=%.2f hiderFade=%.1f hiderIntensity=%.2f", tonumber(config.seekerFadeDist or 120), tonumber(config.seekerFilterIntensity or 1), tonumber(config.hiderFadeDist or 120), tonumber(config.hiderFilterIntensity or 0.35)))
     send(playerId, string.format("Stability: forceGhostOffOnRestore=%s cleanupSweepSeconds=%s spawnswapRetryCount=%s seekerTabPrevention=%s hideNametagsInRound=%s nodeGrab=%s hiderReset=%s", tostring(config.forceGhostOffOnRestore ~= false), tostring(tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15), tostring(tonumber(config.spawnswapRetryCount or 1) or 1), tostring(config.seekerTabPrevention ~= false), tostring(config.hideNametagsInRound ~= false), tostring(config.allowNodeGrabInRound == true), tostring(config.allowHiderResetInRound == true)))
+    send(playerId, string.format("Autorun: enabled=%s interval=%ss trigger_if_players>%s", tostring(config.autorunEnabled == true), tostring(math.floor(tonumber(config.autorunIntervalSeconds or 600) or 600)), tostring(math.floor(tonumber(config.autorunMinPlayers or 2) or 2))))
 end
 
 local function showHelp(playerId)
@@ -1355,6 +1379,36 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             config.allowHiderResetInRound = (v == "on")
             broadcast("allowHiderResetInRound=" .. tostring(config.allowHiderResetInRound))
             broadcastSettings()
+            return 1
+        elseif key == "autorun" then
+            local v = tostring(words[3] or ""):lower()
+            if v ~= "on" and v ~= "off" then
+                send(playerId, "Usage: /phset autorun <on|off>")
+                return 1
+            end
+            config.autorunEnabled = (v == "on")
+            if config.autorunEnabled then
+                gameState.lastAutoStartAt = now()
+            end
+            broadcast("autorunEnabled=" .. tostring(config.autorunEnabled))
+            return 1
+        elseif key == "autoruninterval" then
+            local sec = tonumber(words[3])
+            if not sec then
+                send(playerId, "Usage: /phset autoruninterval <seconds>")
+                return 1
+            end
+            config.autorunIntervalSeconds = clamp(math.floor(sec), 60, 86400)
+            broadcast("autorunIntervalSeconds=" .. tostring(config.autorunIntervalSeconds))
+            return 1
+        elseif key == "autorunminplayers" then
+            local n = tonumber(words[3])
+            if not n then
+                send(playerId, "Usage: /phset autorunminplayers <n>")
+                return 1
+            end
+            config.autorunMinPlayers = clamp(math.floor(n), 0, 64)
+            broadcast("autorunMinPlayers=" .. tostring(config.autorunMinPlayers) .. " (starts when players > n)")
             return 1
         elseif key == "seekerfadedist" then
             local m = tonumber(words[3])

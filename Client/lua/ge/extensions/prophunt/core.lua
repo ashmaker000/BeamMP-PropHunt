@@ -693,8 +693,8 @@ local function scrubTempVehicleNameMetadata()
 end
 
 local function shouldApplyNametagMaskNow()
-    -- Nametag masking disabled per server/user decision; keep BeamMP defaults visible.
-    return false
+    -- Only seekers should have nametags hidden during active rounds.
+    return (gameActive == true and hideNametagsInRound == true and tostring(playerTeam or "") == "seeker")
 end
 
 local function pulseNicknameRenderer()
