@@ -23,7 +23,7 @@ M.defaults = {
   tempPropSweepSeconds = 15, -- legacy alias
   forceGhostOffOnRestore = true,
   spawnswapRetryCount = 2,
-  seekerTabPrevention = true,
+  seekerTabPrevention = false,
   allowNodeGrabInRound = false,
   allowHiderResetInRound = false,
 

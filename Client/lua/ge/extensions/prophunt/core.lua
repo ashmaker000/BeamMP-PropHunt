@@ -432,6 +432,10 @@ local function enforceSeekerHideTopCamera()
     end)
 end
 
+local function shouldAllowHiderResetNow()
+    return (gameActive == true and playerTeam == "hider" and hidePhase == true)
+end
+
 local function enforceHiderAbilityLock()
     if not (gameActive and playerTeam == "hider") then return end
     local veh = be:getPlayerVehicle(0)
@@ -456,7 +460,7 @@ local function enforceHiderAbilityLock()
             end
         end)
     end
-    if not allowHiderResetInRound then
+    if not shouldAllowHiderResetNow() then
         pcall(function()
             if input and input.event then
                 input.event('recover', 0, 2)
@@ -485,7 +489,7 @@ local function getHiderBlockedActions()
     for _, a in ipairs(hiderBlockedActions) do
         local aa = tostring(a)
         local isReset = (aa == "recover" or aa == "recover_vehicle" or aa == "recover_vehicle_alt" or aa == "reset_physics" or aa == "reset_all_physics")
-        if not (allowHiderResetInRound and isReset) then
+        if not (shouldAllowHiderResetNow() and isReset) then
             list[#list + 1] = aa
         end
     end
@@ -503,8 +507,12 @@ local function enforceActionFilters()
     end
 
     local shouldHider = (gameActive == true and playerTeam == "hider")
-    if shouldHider ~= actionFilterHiderActive then
+    -- Refresh hider lock group every update so hide-phase reset allowance applies immediately
+    -- when phase flips hide <-> round.
+    if shouldHider then
         core_input_actionFilter.setGroup("ph_hider_lock", getHiderBlockedActions())
+    end
+    if shouldHider ~= actionFilterHiderActive then
         core_input_actionFilter.addAction(0, "ph_hider_lock", shouldHider)
         actionFilterHiderActive = shouldHider
     end
@@ -527,7 +535,9 @@ local function enforceMovingResetLock(dt)
     if not core_input_actionFilter then return end
     local shouldBlock = false
 
-    if gameActive and disableResetsWhenMoving then
+    if shouldAllowHiderResetNow() then
+        shouldBlock = false
+    elseif gameActive and disableResetsWhenMoving then
         local veh = be:getPlayerVehicle(0)
         if veh and veh.getID and veh.getVelocityXYZ then
             local vid = veh:getID()
@@ -621,22 +631,6 @@ local function enforceNametagHardMask(enabled)
         for _, p in pairs(MPVehicleGE.getPlayers() or {}) do
             if type(p) == "table" then
                 p.hideNametag = (enabled == true)
-                if enabled == true then
-                    p.name = ""
-                    p.playerName = ""
-                    p.nickname = ""
-                    p.ownerName = ""
-                    p.shortname = ""
-                    p.nickPrefixes = {}
-                    p.nickSuffixes = {}
-                    if p.role then
-                        p.role.name = ""
-                        p.role.tag = ""
-                        p.role.shorttag = ""
-                    end
-                    pcall(function() if p.setDisplayName then p:setDisplayName("") end end)
-                    pcall(function() if p.clearCustomRole then p:clearCustomRole() end end)
-                end
             end
         end
     end
@@ -646,20 +640,6 @@ local function enforceNametagHardMask(enabled)
         for _, v in pairs(MPVehicleGE.getVehicles() or {}) do
             if type(v) == "table" then
                 v.hideNametag = (enabled == true)
-                if enabled == true then
-                    v.ownerName = ""
-                    v.nickname = ""
-                    v.shortname = ""
-                    v.nickPrefixes = {}
-                    v.nickSuffixes = {}
-                    if v.role then
-                        v.role.name = ""
-                        v.role.tag = ""
-                        v.role.shorttag = ""
-                    end
-                    pcall(function() if v.setDisplayName then v:setDisplayName("") end end)
-                    pcall(function() if v.clearCustomRole then v:clearCustomRole() end end)
-                end
             end
         end
     end
@@ -667,40 +647,92 @@ local function enforceNametagHardMask(enabled)
     hardNametagMaskActive = (enabled == true)
 end
 
-
-local function scrubTempVehicleNameMetadata()
-    if not MPVehicleGE or not MPVehicleGE.getVehicles then return end
-    for _, veh in pairs(MPVehicleGE.getVehicles() or {}) do
-        local svs = tostring(veh.serverVehicleString or "")
-        local _, idxStr = string.match(svs, "^(%d+)%-(%d+)$")
-        local idx = tonumber(idxStr)
-        if idx and idx > 0 then
-            veh.hideNametag = true
-            veh.ownerName = ""
-            veh.nickname = ""
-            veh.shortname = ""
-            veh.nickPrefixes = {}
-            veh.nickSuffixes = {}
-            if veh.role then
-                veh.role.name = ""
-                veh.role.tag = ""
-                veh.role.shorttag = ""
-            end
-            pcall(function() if veh.setDisplayName then veh:setDisplayName("") end end)
-            pcall(function() if veh.clearCustomRole then veh:clearCustomRole() end end)
-        end
-    end
+-- Keep nametag masking decision in one place.
+-- True only during active rounds when the server/config requests hidden nametags.
+local function shouldApplyNametagMaskNow()
+    if hideNametagsInRound ~= true then return false end
+    if not gameActive then return false end
+    return true
 end
 
-local function shouldApplyNametagMaskNow()
-    -- Only seekers should have nametags hidden during active rounds.
-    return (gameActive == true and hideNametagsInRound == true and tostring(playerTeam or "") == "seeker")
+local function ownerPidFromVehicleEntry(v)
+    if type(v) ~= "table" then return nil end
+    local sv = tostring(v.serverVehicleString or "")
+    local pidStr = sv:match("^(%d+)%-%d+$")
+    if pidStr then return tonumber(pidStr) end
+    local vid = tonumber(v.gameVehicleID)
+    if vid and proximity and proximity.resolveOwnerPlayerIdFromVehId then
+        return proximity.resolveOwnerPlayerIdFromVehId(vid)
+    end
+    return nil
+end
+
+-- Nametag policy requested by user:
+-- - If hideNametagsInRound=true => hide all during round.
+-- - Else, during round:
+--   * hider client: show only hider nametags (hide seekers)
+--   * seeker client: hide all nametags
+-- - Out of round: normal nametags for everyone.
+local function applyNametagPolicyNow()
+    if not MPVehicleGE then return end
+
+    if shouldApplyNametagMaskNow() then
+        if MPVehicleGE.hideNicknames then pcall(function() MPVehicleGE.hideNicknames(true) end) end
+        enforceNametagHardMask(true)
+        return
+    end
+
+    if not gameActive then
+        if MPVehicleGE.hideNicknames then pcall(function() MPVehicleGE.hideNicknames(false) end) end
+        enforceNametagHardMask(false)
+        return
+    end
+
+    if playerTeam == "seeker" then
+        if MPVehicleGE.hideNicknames then pcall(function() MPVehicleGE.hideNicknames(true) end) end
+        enforceNametagHardMask(true)
+        return
+    end
+
+    if playerTeam == "hider" then
+        if MPVehicleGE.hideNicknames then pcall(function() MPVehicleGE.hideNicknames(false) end) end
+
+        if MPVehicleGE.getVehicles then
+            for _, v in pairs(MPVehicleGE.getVehicles() or {}) do
+                if type(v) == "table" then
+                    local pid = ownerPidFromVehicleEntry(v)
+                    local isHider = (pid and proximity and proximity.pidIsHider and proximity.pidIsHider(pid)) or false
+                    v.hideNametag = not isHider
+                end
+            end
+        end
+
+        if MPVehicleGE.getPlayers then
+            for _, p in pairs(MPVehicleGE.getPlayers() or {}) do
+                if type(p) == "table" then
+                    local pid = tonumber(p.playerID or p.id or p.pid)
+                    local isHider = (pid and proximity and proximity.pidIsHider and proximity.pidIsHider(pid)) or false
+                    p.hideNametag = not isHider
+                end
+            end
+        end
+
+        hardNametagMaskActive = false
+        return
+    end
+
+    if MPVehicleGE.hideNicknames then pcall(function() MPVehicleGE.hideNicknames(false) end) end
+    enforceNametagHardMask(false)
+end
+
+local function scrubTempVehicleNameMetadata()
+    -- disabled: do not mutate nickname/owner metadata (can persist after round and show distance-only tags)
 end
 
 local function pulseNicknameRenderer()
     if not MPVehicleGE or not MPVehicleGE.hideNicknames then return end
     local desired = shouldApplyNametagMaskNow() and true or false
-    pcall(function() MPVehicleGE.hideNicknames(not desired) end)
+    pcall(function() MPVehicleGE.hideNicknames(desired) end)
     if scheduler and scheduler.add then
         local t = 0
         scheduler.add(function(dt)
@@ -1045,7 +1077,6 @@ local function onUpdate(dt)
         if MPVehicleGE and MPVehicleGE.hideNicknames then
             if desiredMask then
                 pcall(function() MPVehicleGE.hideNicknames(true) end)
-                scrubTempVehicleNameMetadata()
             else
                 pcall(function() MPVehicleGE.hideNicknames(false) end)
             end
@@ -1212,14 +1243,8 @@ local function onUpdate(dt)
     forceSeekerBlackoutNow()
 
     -- AUTO TAUNT
-    -- Keep nametags hidden for everyone throughout active rounds
-    -- (some builds/UI refreshes can re-enable them).
-    if shouldApplyNametagMaskNow() and MPVehicleGE and MPVehicleGE.hideNicknames then
-        MPVehicleGE.hideNicknames(true)
-        enforceNametagHardMask(true)
-    elseif hardNametagMaskActive then
-        enforceNametagHardMask(false)
-    end
+    -- Keep nametag visibility policy sticky (BeamMP UI refresh can revert it).
+    applyNametagPolicyNow()
 
     -- Auto-taunt disabled by default (it can sound like an auto horn).
     if AUTO_TAUNT_ENABLED and isHidden and propID then
@@ -1395,21 +1420,18 @@ onGameStart = function(data)
     -- Safety sweep for stale temp props from old rounds/builds.
     if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
 
-    -- Hide nametags for everyone during active rounds
-    -- (apply immediately + delayed to beat BeamMP UI refresh).
-    if shouldApplyNametagMaskNow() and MPVehicleGE and MPVehicleGE.hideNicknames then
-        MPVehicleGE.hideNicknames(true)
-        if scheduler and scheduler.add then
-            local t = 0
-            scheduler.add(function(dt)
-                t = t + dt
-                if t > 1.0 then
-                    MPVehicleGE.hideNicknames(true)
-                    return false
-                end
-                return true
-            end)
-        end
+    -- Apply nametag policy immediately + delayed (to beat BeamMP UI refresh).
+    applyNametagPolicyNow()
+    if scheduler and scheduler.add then
+        local t = 0
+        scheduler.add(function(dt)
+            t = t + dt
+            if t > 1.0 then
+                applyNametagPolicyNow()
+                return false
+            end
+            return true
+        end)
     end
 
     if team == "seeker" then
@@ -2496,10 +2518,7 @@ onTeamUpdate = function(data)
     if team and team ~= "" then
         playerTeam = team
         if team == "seeker" then
-            -- Ensure nametags stay hidden when enabled.
-            if shouldApplyNametagMaskNow() and MPVehicleGE and MPVehicleGE.hideNicknames then
-                MPVehicleGE.hideNicknames(true)
-            end
+            applyNametagPolicyNow()
             local sv = be:getPlayerVehicle(0)
             seekerLockedVehId = sv and sv:getID() or seekerLockedVehId
             beamMessage({ msg = "You have been CONVERTED into a SEEKER!", ttl = 4, icon = 'visibility' })
@@ -2507,6 +2526,7 @@ onTeamUpdate = function(data)
             -- Failsafe: if role switched away from seeker, force-clear seeker blackout effects.
             setSeekerVisualBlock(false)
             clearSeekerBlackoutFallback()
+            applyNametagPolicyNow()
             beamMessage({ msg = "Team updated: " .. tostring(team), ttl = 3, icon = 'info' })
         end
     end

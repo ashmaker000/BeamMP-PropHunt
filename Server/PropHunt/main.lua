@@ -892,14 +892,13 @@ end
 
 -- TIMER (BeamMP)
 -- Match the Outbreak mod pattern exactly: create a 1s timer named "second".
-function timer()
+function phSecondTimer()
     PropHunt_onTick()
 end
 
-MP.RegisterEvent("second", "timer")
-MP.CancelEventTimer("counter")
-MP.CancelEventTimer("second")
-MP.CreateEventTimer("second", 1000)
+MP.RegisterEvent("ph_second", "phSecondTimer")
+MP.CancelEventTimer("ph_second")
+MP.CreateEventTimer("ph_second", 1000)
 
 -- ============================
 -- CHAT COMMANDS (server)
@@ -1848,6 +1847,7 @@ MP.RegisterEvent("PropHunt_onContactReceive", "PropHunt_onContactReceive")
 
 -- Backwards compatible tag request event
 MP.RegisterEvent("PropHunt_TagRequest", "PropHunt_onTagRequest")
+-- NOTE: intentionally NOT registering generic "onContact" to avoid cross-mod event collisions (e.g., Outbreak).
 
 -- ============================
 -- SEEKER SCAN EVENT
