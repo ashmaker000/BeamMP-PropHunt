@@ -17,23 +17,41 @@ Server-authoritative PropHunt mode with hide phase, seeker/hider teams, prop dis
 - Round summary broadcast (winner/reason/duration/tags/conversions/elims)
 - `/ph status` live diagnostics
 
-## Structure
-- `Server/PropHunt/main.lua` - main server logic + command handling
-- `Server/PropHunt/config.lua` - server config defaults
-- `Client/lua/ge/extensions/PropHunt.lua` - thin loader
-- `Client/lua/ge/extensions/prophunt/core.lua` - core client logic
-- `Client/lua/ge/extensions/prophunt/util.lua` - message/category helpers
-- `Client/lua/ge/extensions/prophunt/audio.lua` - taunt/audio emitter system
-- `Client/lua/ge/extensions/prophunt/visuals.lua` - vignette/visual helper functions
-- `Client/lua/ge/extensions/prophunt/commands.lua` - client `/ph...` command routing
-- `Client/lua/ge/extensions/prophunt/network.lua` - network event registration mapping
-- `Client/lua/ge/extensions/prophunt/disguise.lua` - hider prop-disguise pipeline
-- `Client/lua/ge/extensions/prophunt/proximity.lua` - team lists + nearest-distance queries
+### Installation
 
-## Setup
-1. Place `Client/` and `Server/` in your BeamMP mod resource.
-2. Ensure server loads `Server/PropHunt/main.lua`.
-3. Ensure client zip includes folders at zip root (no extra wrapper folder).
+1. **Download the release**
+
+   * Go to the **Releases** page.
+   * Download the latest `.zip` file.
+
+2. **Extract the files**
+
+   * Unzip the download.
+   * You will get two folders:
+
+     * `Client`
+     * `Server`
+
+3. **Install the client files**
+
+   * Open the extracted **Client** folder.
+   * Inside it is a `.zip` file.
+   * Upload that `.zip` into your server’s **client mods folder**.
+
+4. **Install the server files**
+
+   * Open the extracted **Server** folder.
+   * Inside is a folder for the game mode (e.g. `CarHunt`, `Tag`, `PropHunt` etc.).
+   * On your server, open the main **server folder**.
+   * Create a folder for that game mode (for example: `CarHunt`, `Tag`, `PropHunt`).
+   * Copy **all files** from the extracted game mode folder into the matching folder you just created on the server.
+
+5. **Restart the server**
+
+   * Restart your BeamMP server.
+   * The game mode should now be active.
+
+---
 
 ## Commands
 ### Core
@@ -79,28 +97,3 @@ Server-authoritative PropHunt mode with hide phase, seeker/hider teams, prop dis
 ### Props
 - `/ph props random`
 - `/ph props <propKey>`
-
-## Config
-Edit `Server/PropHunt/config.lua`:
-- `roundTime`, `hideTime`, `allowSoloTest` (enable 1-player local test starts)
-- `mode`
-- `seekerMode`, `seekerCount`, `seekerRatio`
-- `joinPolicy`
-- `disguiseMode` (`replace` stable, `preload` experimental, `spawnswap` experimental: pre-spawn far away then swap at hide-end)
-- `forceGhostOffOnRestore` (bool), `spawnswapRetryCount` (int), `cleanupSweepSeconds` (int), `seekerTabPrevention` (bool)
-- `tauntCooldown`, `tagCooldown`, `scanCooldown`, `sameTargetCooldown`
-- `minEventGapTempProp`, `minEventGapTag`, `minEventGapTaunt`, `minEventGapScan` (anti-spam hard floors)
-- `requireTagCorroboration`, `requireMutualContact`, `tagCorroborationWindow` (anti-spoof tag corroboration)
-- `adminAclEnabled` (default `false`), `adminIds`, `adminNames`
-- `currentPreset`, `mapProfiles`, `propTierMode`
-- `spawnBanks` (optional map/team coordinate banks for spawn hints)
-- `perksEnabled`
-- `seekerFadeDist`, `seekerFilterIntensity`
-- `hiderFadeDist`, `hiderFilterIntensity`
-- `nextRoundForcedProp`
-- `propPool`
-
-## Notes
-- `joinPolicy=lock_next_round` is safest for competitive rounds.
-- Mid-round hider joins (`joinPolicy=hider`) receive immediate prop assignment.
-- Use `/ph status` to verify state/settings during live tests.
