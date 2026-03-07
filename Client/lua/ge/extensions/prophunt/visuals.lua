@@ -3,18 +3,42 @@ M.BUILD = "2026-02-11-phase2e"
 
 local seekerVisualBlockActive = false
 
+local VIGNETTE_OWNER_KEY = "__beammp_vignette_owner"
+local VIGNETTE_OWNER_ID = "prophunt"
+local function getVignetteOwner()
+  return rawget(_G, VIGNETTE_OWNER_KEY)
+end
+local function claimVignetteOwner()
+  local owner = getVignetteOwner()
+  if owner == nil or owner == VIGNETTE_OWNER_ID then
+    rawset(_G, VIGNETTE_OWNER_KEY, VIGNETTE_OWNER_ID)
+    return true
+  end
+  return false
+end
+local function releaseVignetteOwner()
+  if getVignetteOwner() == VIGNETTE_OWNER_ID then
+    rawset(_G, VIGNETTE_OWNER_KEY, nil)
+  end
+end
+
 function M.setSeekerVisualBlock(state)
   seekerVisualBlockActive = (state == true)
 
   if extensions and extensions.vignetteShaderAPI then
     if seekerVisualBlockActive then
-      extensions.vignetteShaderAPI.setEnabled(true)
-      -- Full-screen blackout (same trick as flashbang, but black).
-      extensions.vignetteShaderAPI.setInnerRadius(0.0)
-      extensions.vignetteShaderAPI.setOuterRadius(0.0)
-      extensions.vignetteShaderAPI.setColor(Point4F(0, 0, 0, 1.0))
+      if claimVignetteOwner() then
+        extensions.vignetteShaderAPI.setEnabled(true)
+        -- Full-screen blackout (same trick as flashbang, but black).
+        extensions.vignetteShaderAPI.setInnerRadius(0.0)
+        extensions.vignetteShaderAPI.setOuterRadius(0.0)
+        extensions.vignetteShaderAPI.setColor(Point4F(0, 0, 0, 1.0))
+      end
     else
-      extensions.vignetteShaderAPI.resetVignette()
+      if getVignetteOwner() == VIGNETTE_OWNER_ID then
+        extensions.vignetteShaderAPI.resetVignette()
+      end
+      releaseVignetteOwner()
     end
   end
 
@@ -33,6 +57,7 @@ function M.setProximityVignette(strength, intensity)
 
   -- Never let proximity effects override the seeker blackout during hide phase.
   if seekerVisualBlockActive then return end
+  if not claimVignetteOwner() then return end
 
   local alpha = 0
   if strength and strength > 0 and intensity and intensity > 0 then
@@ -46,7 +71,10 @@ function M.setProximityVignette(strength, intensity)
     extensions.vignetteShaderAPI.setOuterRadius(1.2)
     extensions.vignetteShaderAPI.setColor(Point4F(1, 0, 0, alpha))
   else
-    extensions.vignetteShaderAPI.resetVignette()
+    if getVignetteOwner() == VIGNETTE_OWNER_ID then
+      extensions.vignetteShaderAPI.resetVignette()
+    end
+    releaseVignetteOwner()
   end
 end
 

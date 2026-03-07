@@ -69,7 +69,9 @@ do
             perksEnabled = true,
             autorunEnabled = false,
             autorunIntervalSeconds = 600,
-            autorunMinPlayers = 2
+            autorunMinPlayers = 2,
+            autoTauntEnabled = false,
+            autoTauntIntervalSeconds = 30
         }
     end
 end
@@ -101,6 +103,8 @@ if config.perksEnabled == nil then config.perksEnabled = true end
 if config.autorunEnabled == nil then config.autorunEnabled = false end
 if config.autorunIntervalSeconds == nil then config.autorunIntervalSeconds = 600 end
 if config.autorunMinPlayers == nil then config.autorunMinPlayers = 2 end
+if config.autoTauntEnabled == nil then config.autoTauntEnabled = false end
+if config.autoTauntIntervalSeconds == nil then config.autoTauntIntervalSeconds = 30 end
 
 if tostring(config.disguiseMode or ""):lower() == "spawnswap" then
     print("PropHunt WARN: disguisemode=spawnswap is deprecated/disabled; forcing replace")
@@ -450,6 +454,8 @@ local function formatSettingsPayload()
         .. "," .. tostring(config.hideNametagsInRound ~= false)
         .. "," .. tostring(config.allowNodeGrabInRound == true)
         .. "," .. tostring(config.allowHiderResetInRound == true)
+        .. "," .. tostring(config.autoTauntEnabled == true)
+        .. "," .. tostring(math.max(5, math.floor(tonumber(config.autoTauntIntervalSeconds or 30) or 30)))
 end
 
 local function pushSettingsToClient(playerId)
@@ -941,6 +947,7 @@ local function showStatus(playerId)
     send(playerId, string.format("Visuals: seekerFade=%.1f seekerIntensity=%.2f hiderFade=%.1f hiderIntensity=%.2f", tonumber(config.seekerFadeDist or 120), tonumber(config.seekerFilterIntensity or 1), tonumber(config.hiderFadeDist or 120), tonumber(config.hiderFilterIntensity or 0.35)))
     send(playerId, string.format("Stability: forceGhostOffOnRestore=%s cleanupSweepSeconds=%s spawnswapRetryCount=%s seekerTabPrevention=%s hideNametagsInRound=%s nodeGrab=%s hiderReset=%s", tostring(config.forceGhostOffOnRestore ~= false), tostring(tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15), tostring(tonumber(config.spawnswapRetryCount or 1) or 1), tostring(config.seekerTabPrevention ~= false), tostring(config.hideNametagsInRound ~= false), tostring(config.allowNodeGrabInRound == true), tostring(config.allowHiderResetInRound == true)))
     send(playerId, string.format("Autorun: enabled=%s interval=%ss trigger_if_players>%s", tostring(config.autorunEnabled == true), tostring(math.floor(tonumber(config.autorunIntervalSeconds or 600) or 600)), tostring(math.floor(tonumber(config.autorunMinPlayers or 2) or 2))))
+    send(playerId, string.format("AutoTaunt: enabled=%s interval=%ss", tostring(config.autoTauntEnabled == true), tostring(math.floor(tonumber(config.autoTauntIntervalSeconds or 30) or 30))))
 end
 
 local function showHelp(playerId)
@@ -970,6 +977,8 @@ local function showHelp(playerId)
     send(playerId, "  /ph set seekerfilterintensity <0-1> - (Seekers) vignette strength")
     send(playerId, "  /ph set hiderfadedist <meters> - (Hiders) proximity vignette range")
     send(playerId, "  /ph set hiderfilterintensity <0-1> - (Hiders) vignette strength")
+    send(playerId, "  /ph set autotaunt <on|off>")
+    send(playerId, "  /ph set autotauntinterval <seconds>")
     send(playerId, "  /ph preset casual|ranked|chaos")
     send(playerId, "  /ph mapprofile <mapKey> <casual|ranked|chaos>")
     send(playerId, "  /ph spawnbank add <mapKey> <seeker|hider> <x> <y> <z>")
@@ -1408,6 +1417,26 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             end
             config.autorunMinPlayers = clamp(math.floor(n), 0, 64)
             broadcast("autorunMinPlayers=" .. tostring(config.autorunMinPlayers) .. " (starts when players > n)")
+            return 1
+        elseif key == "autotaunt" then
+            local v = tostring(words[3] or ""):lower()
+            if v ~= "on" and v ~= "off" then
+                send(playerId, "Usage: /phset autotaunt <on|off>")
+                return 1
+            end
+            config.autoTauntEnabled = (v == "on")
+            broadcast("autoTauntEnabled=" .. tostring(config.autoTauntEnabled))
+            broadcastSettings()
+            return 1
+        elseif key == "autotauntinterval" then
+            local sec = tonumber(words[3])
+            if not sec then
+                send(playerId, "Usage: /phset autotauntinterval <seconds>")
+                return 1
+            end
+            config.autoTauntIntervalSeconds = clamp(math.floor(sec), 5, 300)
+            broadcast("autoTauntIntervalSeconds=" .. tostring(config.autoTauntIntervalSeconds))
+            broadcastSettings()
             return 1
         elseif key == "seekerfadedist" then
             local m = tonumber(words[3])

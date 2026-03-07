@@ -2,8 +2,8 @@
 local M = {}
 
 -- --- CONFIG ---
-local TAUNT_INTERVAL = 30
-local AUTO_TAUNT_ENABLED = false -- disable auto taunt (horn) by default
+local tauntIntervalSeconds = 30
+local autoTauntEnabled = false -- server-overridable
 local TAUNT_SOUND_DISTANCE = 50 -- how far taunts can be heard (reduced from 150)
 
 local SOUND_VOLUME = 1
@@ -187,8 +187,10 @@ local closestHunterInfo = {}
 local ffiAvailable = (ffi and ffi.C and ffi.C.BNG_DBG_DRAW_TextAdvanced)
 local drawTextAdvanced = ffiAvailable and ffi.C.BNG_DBG_DRAW_TextAdvanced or nil
 local hunterTagColor = color(255, 50, 50, 255)
+hiderTagColor = color(90, 220, 120, 255)
 local hunterTagBack = color(0, 0, 0, 150)
 local hunterTagPos = vec3()
+hiderTagPos = vec3()
 
 local PH_BUILD = "2026-02-25-topcam-lock"
 
@@ -432,7 +434,7 @@ local function enforceSeekerHideTopCamera()
     end)
 end
 
-local function shouldAllowHiderResetNow()
+function shouldAllowHiderResetNow()
     return (gameActive == true and playerTeam == "hider" and hidePhase == true)
 end
 
@@ -655,7 +657,7 @@ local function shouldApplyNametagMaskNow()
     return true
 end
 
-local function ownerPidFromVehicleEntry(v)
+function ownerPidFromVehicleEntry(v)
     if type(v) ~= "table" then return nil end
     local sv = tostring(v.serverVehicleString or "")
     local pidStr = sv:match("^(%d+)%-%d+$")
@@ -673,7 +675,7 @@ end
 --   * hider client: show only hider nametags (hide seekers)
 --   * seeker client: hide all nametags
 -- - Out of round: normal nametags for everyone.
-local function applyNametagPolicyNow()
+function applyNametagPolicyNow()
     if not MPVehicleGE then return end
 
     if shouldApplyNametagMaskNow() then
@@ -779,6 +781,86 @@ local function drawHunterTag(info)
     end
 end
 
+function drawAllSeekerTags()
+    if not drawTextAdvanced then return end
+    if not MPVehicleGE or not MPVehicleGE.getVehicles then return end
+    if not proximity or not proximity.pidIsSeeker then return end
+
+    local myVeh = be:getPlayerVehicle(0)
+    local myId = myVeh and myVeh:getID() or nil
+
+    for _, sv in pairs(MPVehicleGE.getVehicles() or {}) do
+        local vid = tonumber(sv and sv.gameVehicleID)
+        if vid and vid ~= myId then
+            local pid = nil
+            local svs = tostring(sv.serverVehicleString or "")
+            local pidStr = svs:match("^(%d+)%-%d+$")
+            if pidStr then pid = tonumber(pidStr) end
+            if (not pid) and proximity.resolveOwnerPlayerIdFromVehId then
+                pid = proximity.resolveOwnerPlayerIdFromVehId(vid)
+            end
+
+            if pid and proximity.pidIsSeeker(pid) then
+                local veh = be:getObjectByID(vid)
+                if veh then
+                    hunterTagPos:set(be:getObjectOOBBCenterXYZ(vid))
+                    local vh = 0
+                    if not veh.vehicleHeight or veh.vehicleHeight == 0 then
+                        if veh.getInitialHeight then
+                            vh = veh:getInitialHeight() or 0
+                            veh.vehicleHeight = vh
+                        end
+                    else
+                        vh = veh.vehicleHeight
+                    end
+                    hunterTagPos.z = hunterTagPos.z + (vh * 0.5) + 0.2
+                    drawTextAdvanced(hunterTagPos.x, hunterTagPos.y, hunterTagPos.z, String(" Seeker "), hunterTagColor, true, false, hunterTagBack, false, false)
+                end
+            end
+        end
+    end
+end
+
+function drawHiderTags()
+    if not drawTextAdvanced then return end
+    if not MPVehicleGE or not MPVehicleGE.getVehicles then return end
+    if not proximity or not proximity.pidIsHider then return end
+
+    local myVeh = be:getPlayerVehicle(0)
+    local myId = myVeh and myVeh:getID() or nil
+
+    for _, sv in pairs(MPVehicleGE.getVehicles() or {}) do
+        local vid = tonumber(sv and sv.gameVehicleID)
+        if vid and vid ~= myId then
+            local pid = nil
+            local svs = tostring(sv.serverVehicleString or "")
+            local pidStr = svs:match("^(%d+)%-%d+$")
+            if pidStr then pid = tonumber(pidStr) end
+            if (not pid) and proximity.resolveOwnerPlayerIdFromVehId then
+                pid = proximity.resolveOwnerPlayerIdFromVehId(vid)
+            end
+
+            if pid and proximity.pidIsHider(pid) then
+                local veh = be:getObjectByID(vid)
+                if veh then
+                    hiderTagPos:set(be:getObjectOOBBCenterXYZ(vid))
+                    local vh = 0
+                    if not veh.vehicleHeight or veh.vehicleHeight == 0 then
+                        if veh.getInitialHeight then
+                            vh = veh:getInitialHeight() or 0
+                            veh.vehicleHeight = vh
+                        end
+                    else
+                        vh = veh.vehicleHeight
+                    end
+                    hiderTagPos.z = hiderTagPos.z + (vh * 0.5) + 0.2
+                    drawTextAdvanced(hiderTagPos.x, hiderTagPos.y, hiderTagPos.z, String(" Hider "), hiderTagColor, true, false, hunterTagBack, false, false)
+                end
+            end
+        end
+    end
+end
+
 local lastHunterNotifyPid = nil
 local lastHunterNotifyTime = 0
 local HUNTER_NOTICE_COOLDOWN = 1.0
@@ -820,6 +902,30 @@ local function notifyNearestHunter()
     end
     lastHunterNotifyPid = info.pid
     lastHunterNotifyTime = now
+end
+
+function getNearestAnyRemoteDistance()
+    local myVeh = be:getPlayerVehicle(0)
+    if not myVeh or not MPVehicleGE or not MPVehicleGE.getVehicles then return nil end
+    local myPos = myVeh:getPosition()
+    if not myPos then return nil end
+
+    local best = nil
+    for _, sv in pairs(MPVehicleGE.getVehicles() or {}) do
+        local vid = tonumber(sv and sv.gameVehicleID)
+        if vid and vid ~= myVeh:getID() then
+            local v = be:getObjectByID(vid)
+            if v and v.getPosition then
+                local p = v:getPosition()
+                if p then
+                    local dx, dy, dz = (p.x-myPos.x), (p.y-myPos.y), (p.z-myPos.z)
+                    local d = math.sqrt(dx*dx + dy*dy + dz*dz)
+                    if not best or d < best then best = d end
+                end
+            end
+        end
+    end
+    return best
 end
 
 requestStateBurst = function()
@@ -989,7 +1095,7 @@ local function performSwap()
     vProp:queueLuaCommand("obj:requestReset(RESET_PHYSICS)")
 
     isHidden = not isHidden
-    tauntTimer = TAUNT_INTERVAL
+    tauntTimer = tauntIntervalSeconds
 
     if isHidden then
         be:enterVehicle(0, vProp)
@@ -1046,7 +1152,7 @@ end
 
 local function manualTaunt()
     triggerTaunt()
-    tauntTimer = TAUNT_INTERVAL
+    tauntTimer = tauntIntervalSeconds
 end
 
 -- --- UPDATE LOOP ---
@@ -1231,6 +1337,12 @@ local function onUpdate(dt)
                 intensity = hiderFilterIntensity or 0
                 notifyNearestHunter()
             end
+
+            -- Fallback: if team-resolved lists are stale/missing, still drive red vignette
+            -- from nearest remote vehicle distance so the feature never appears "dead".
+            if (not distance) or distance <= 0 then
+                distance = getNearestAnyRemoteDistance()
+            end
         end
 
         local strength = strengthFromDistance(distance, maxRange)
@@ -1247,15 +1359,15 @@ local function onUpdate(dt)
     applyNametagPolicyNow()
 
     -- Auto-taunt disabled by default (it can sound like an auto horn).
-    if AUTO_TAUNT_ENABLED and isHidden and propID then
+    if autoTauntEnabled and isHidden and propID then
         tauntTimer = tauntTimer - dt
         if tauntTimer <= 0 then
             triggerTaunt()
-            tauntTimer = TAUNT_INTERVAL
+            tauntTimer = tauntIntervalSeconds
         end
 
         -- Reset electrics a moment later so sound doesn't loop incorrectly
-        if tauntTimer < (TAUNT_INTERVAL - 2) and tauntTimer > (TAUNT_INTERVAL - 2.2) then
+        if tauntTimer < (tauntIntervalSeconds - 2) and tauntTimer > (tauntIntervalSeconds - 2.2) then
             local veh = be:getObjectByID(propID)
             if veh then
                 veh:queueLuaCommand("electrics.values.phTaunt = ''")
@@ -2296,7 +2408,7 @@ onSettings = function(data)
         seekerTabPrevention = not (b == "false" or b == "0" or b == "off")
     end
 
-    -- Optional (backward-compatible): hide nametags toggle, then moving reset controls.
+    -- Optional (backward-compatible): hide nametags + ability flags + auto-taunt settings.
     if #parts >= 11 then
         local b = tostring(parts[11] or ""):lower()
         hideNametagsInRound = not (b == "false" or b == "0" or b == "off")
@@ -2304,22 +2416,22 @@ onSettings = function(data)
 
     if #parts >= 12 then
         local b = tostring(parts[12] or ""):lower()
-        disableResetsWhenMoving = not (b == "false" or b == "0" or b == "off")
+        allowNodeGrabInRound = (b == "true" or b == "1" or b == "on")
     end
 
     if #parts >= 13 then
-        local v = tonumber(parts[13])
-        if v then maxResetMovingSpeed = math.max(0, v) end
+        local b = tostring(parts[13] or ""):lower()
+        allowHiderResetInRound = (b == "true" or b == "1" or b == "on")
     end
 
     if #parts >= 14 then
         local b = tostring(parts[14] or ""):lower()
-        allowNodeGrabInRound = (b == "true" or b == "1" or b == "on")
+        autoTauntEnabled = (b == "true" or b == "1" or b == "on")
     end
 
     if #parts >= 15 then
-        local b = tostring(parts[15] or ""):lower()
-        allowHiderResetInRound = (b == "true" or b == "1" or b == "on")
+        local n = tonumber(parts[15])
+        if n then tauntIntervalSeconds = math.max(5, math.floor(n)) end
     end
 
     -- Apply updated nametag preference immediately.
@@ -2639,8 +2751,12 @@ M.onPreRender = function(dt)
     if gameActive then
         enforceSeekerHideTopCamera()
     end
-    if playerTeam == "hider" and not hidePhase and closestHunterInfo and closestHunterInfo.dist and closestHunterInfo.dist < HUNTER_NOTICE_DISTANCE then
-        drawHunterTag(closestHunterInfo)
+    if playerTeam == "hider" and gameActive and not hidePhase then
+        drawAllSeekerTags()
+    end
+
+    if playerTeam == "hider" and gameActive and not hidePhase and shouldApplyNametagMaskNow() then
+        drawHiderTags()
     end
 end
 M.onChatMessage = onChatMessage
