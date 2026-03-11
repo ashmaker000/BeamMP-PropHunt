@@ -8,21 +8,25 @@ function M.new(ctx)
 
   function self.pidIsSeeker(pid)
     if not pid then return false end
-    if seekerIdSet and seekerIdSet[pid] then return true end
-    if not seekerIdSet or not next(seekerIdSet) then
-      if hiderIdSet and hiderIdSet[pid] then return false end
-      return true
+    if seekerIdSet and next(seekerIdSet) then
+      return seekerIdSet[pid] == true
     end
+    if hiderIdSet and next(hiderIdSet) then
+      return hiderIdSet[pid] ~= true
+    end
+    -- Unknown until lists arrive: be conservative to avoid dual/wrong tags.
     return false
   end
 
   function self.pidIsHider(pid)
     if not pid then return false end
-    if hiderIdSet and hiderIdSet[pid] then return true end
-    if not hiderIdSet or not next(hiderIdSet) then
-      if seekerIdSet and seekerIdSet[pid] then return false end
-      return true
+    if hiderIdSet and next(hiderIdSet) then
+      return hiderIdSet[pid] == true
     end
+    if seekerIdSet and next(seekerIdSet) then
+      return seekerIdSet[pid] ~= true
+    end
+    -- Unknown until lists arrive: be conservative to avoid dual/wrong tags.
     return false
   end
 

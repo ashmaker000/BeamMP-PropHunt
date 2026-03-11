@@ -21,8 +21,8 @@ local activeEmitters = {} -- Store sound emitters for flashbangs
 -- --- VIGNETTE SUPPORT (for white flash effect) ---
 local function ensureVignette()
     -- Try to load the vignette shader API if it isn't loaded yet
-    if not (extensions and extensions.vignetteShaderAPI) then
-        local ok, err = pcall(function() extensions.load("vignetteShaderAPI") end)
+    if not (extensions and extensions.prophuntVignetteAPI) then
+        local ok, err = pcall(function() extensions.load("prophuntVignetteAPI") end)
         if not ok then
             log('E', 'PropHuntFlash', 'Failed to load vignetteShaderAPI: ' .. tostring(err))
         end
@@ -86,7 +86,7 @@ local function onUpdate(dt)
         -- Make sure the vignette system is available
         ensureVignette()
 
-        if extensions and extensions.vignetteShaderAPI then
+        if extensions and extensions.prophuntVignetteAPI then
             -- Strong white flash that fades out near the end.
             -- We fade alpha in the last 0.5 seconds of the effect.
             local alpha = 1
@@ -94,18 +94,18 @@ local function onUpdate(dt)
                 alpha = math.max(0, flashDuration / 0.5)
             end
 
-            extensions.vignetteShaderAPI.setEnabled(true)
-            extensions.vignetteShaderAPI.setColor(Point4F(1, 1, 1, alpha)) -- solid white flash
-            extensions.vignetteShaderAPI.setInnerRadius(0)
-            extensions.vignetteShaderAPI.setOuterRadius(0)
+            extensions.prophuntVignetteAPI.setEnabled(true)
+            extensions.prophuntVignetteAPI.setColor(Point4F(1, 1, 1, alpha)) -- solid white flash
+            extensions.prophuntVignetteAPI.setInnerRadius(0)
+            extensions.prophuntVignetteAPI.setOuterRadius(0)
         end
     else
         -- Flash completed: reset vignette back to normal if it was active
         if flashIntensity > 0 then
             flashIntensity = 0
             ensureVignette()
-            if extensions and extensions.vignetteShaderAPI then
-                extensions.vignetteShaderAPI.resetVignette()
+            if extensions and extensions.prophuntVignetteAPI then
+                extensions.prophuntVignetteAPI.resetVignette()
             end
         end
     end
@@ -150,8 +150,8 @@ local function onExtensionLoaded()
     print("DEBUG: PropHuntFlash extension loaded")
 
     -- Preload vignetteShaderAPI so it's ready when needed
-    if not (extensions and extensions.vignetteShaderAPI) then
-        local ok, err = pcall(function() extensions.load("vignetteShaderAPI") end)
+    if not (extensions and extensions.prophuntVignetteAPI) then
+        local ok, err = pcall(function() extensions.load("prophuntVignetteAPI") end)
         if ok then
             print("DEBUG: vignetteShaderAPI loaded successfully")
         else

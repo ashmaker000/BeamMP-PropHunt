@@ -25,18 +25,18 @@ end
 function M.setSeekerVisualBlock(state)
   seekerVisualBlockActive = (state == true)
 
-  if extensions and extensions.vignetteShaderAPI then
+  if extensions and extensions.prophuntVignetteAPI then
     if seekerVisualBlockActive then
       if claimVignetteOwner() then
-        extensions.vignetteShaderAPI.setEnabled(true)
+        extensions.prophuntVignetteAPI.setEnabled(true)
         -- Full-screen blackout (same trick as flashbang, but black).
-        extensions.vignetteShaderAPI.setInnerRadius(0.0)
-        extensions.vignetteShaderAPI.setOuterRadius(0.0)
-        extensions.vignetteShaderAPI.setColor(Point4F(0, 0, 0, 1.0))
+        extensions.prophuntVignetteAPI.setInnerRadius(0.0)
+        extensions.prophuntVignetteAPI.setOuterRadius(0.0)
+        extensions.prophuntVignetteAPI.setColor(Point4F(0, 0, 0, 1.0))
       end
     else
       if getVignetteOwner() == VIGNETTE_OWNER_ID then
-        extensions.vignetteShaderAPI.resetVignette()
+        extensions.prophuntVignetteAPI.resetVignette()
       end
       releaseVignetteOwner()
     end
@@ -53,7 +53,7 @@ function M.setSeekerVisualBlock(state)
 end
 
 function M.setProximityVignette(strength, intensity)
-  if not extensions or not extensions.vignetteShaderAPI then return end
+  if not extensions or not extensions.prophuntVignetteAPI then return end
 
   -- Never let proximity effects override the seeker blackout during hide phase.
   if seekerVisualBlockActive then return end
@@ -66,13 +66,13 @@ function M.setProximityVignette(strength, intensity)
   end
 
   if alpha > 0 then
-    extensions.vignetteShaderAPI.setEnabled(true)
-    extensions.vignetteShaderAPI.setInnerRadius(0.6)
-    extensions.vignetteShaderAPI.setOuterRadius(1.2)
-    extensions.vignetteShaderAPI.setColor(Point4F(1, 0, 0, alpha))
+    extensions.prophuntVignetteAPI.setEnabled(true)
+    extensions.prophuntVignetteAPI.setInnerRadius(0.6)
+    extensions.prophuntVignetteAPI.setOuterRadius(1.2)
+    extensions.prophuntVignetteAPI.setColor(Point4F(1, 0, 0, alpha))
   else
     if getVignetteOwner() == VIGNETTE_OWNER_ID then
-      extensions.vignetteShaderAPI.resetVignette()
+      extensions.prophuntVignetteAPI.resetVignette()
     end
     releaseVignetteOwner()
   end

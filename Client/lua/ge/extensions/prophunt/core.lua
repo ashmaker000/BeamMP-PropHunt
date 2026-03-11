@@ -235,8 +235,8 @@ local function onExtensionLoaded()
     lastStateRequestAt = 0
 
     -- Ensure helper postFX extensions are loaded
-    if not extensions.vignetteShaderAPI then
-        pcall(function() extensions.load("vignetteShaderAPI") end)
+    if not extensions.prophuntVignetteAPI then
+        pcall(function() extensions.load("prophuntVignetteAPI") end)
     end
     if not extensions.prophuntBlurAPI then
         pcall(function() extensions.load("prophuntBlurAPI") end)
@@ -317,19 +317,19 @@ end
 local function forceSeekerBlackoutNow()
     if not (hidePhase and playerTeam == "seeker") then return end
 
-    if extensions and not extensions.vignetteShaderAPI and extensions.load then
-        pcall(function() extensions.load("vignetteShaderAPI") end)
+    if extensions and not extensions.prophuntVignetteAPI and extensions.load then
+        pcall(function() extensions.load("prophuntVignetteAPI") end)
     end
     if extensions and not extensions.prophuntBlurAPI and extensions.load then
         pcall(function() extensions.load("prophuntBlurAPI") end)
     end
 
-    if extensions and extensions.vignetteShaderAPI then
+    if extensions and extensions.prophuntVignetteAPI then
         pcall(function()
-            extensions.vignetteShaderAPI.setEnabled(true)
-            extensions.vignetteShaderAPI.setInnerRadius(0.0)
-            extensions.vignetteShaderAPI.setOuterRadius(0.0)
-            extensions.vignetteShaderAPI.setColor(Point4F(0, 0, 0, 1.0))
+            extensions.prophuntVignetteAPI.setEnabled(true)
+            extensions.prophuntVignetteAPI.setInnerRadius(0.0)
+            extensions.prophuntVignetteAPI.setOuterRadius(0.0)
+            extensions.prophuntVignetteAPI.setColor(Point4F(0, 0, 0, 1.0))
         end)
     end
 
@@ -669,6 +669,28 @@ function ownerPidFromVehicleEntry(v)
     return nil
 end
 
+local function teamFromVehicleEntry(v)
+    if type(v) ~= "table" then return nil end
+
+    -- Primary authority: server-synced gamestate by ownerName.
+    local ownerName = tostring(v.ownerName or "")
+    if ownerName ~= "" and gamestate and type(gamestate.players) == "table" then
+        local p = gamestate.players[ownerName]
+        if type(p) == "table" and (p.team == "hider" or p.team == "seeker") then
+            return p.team
+        end
+    end
+
+    -- Fallback: proximity pid lookup when name mapping is unavailable.
+    local pid = ownerPidFromVehicleEntry(v)
+    if pid and proximity then
+        if proximity.pidIsHider and proximity.pidIsHider(pid) then return "hider" end
+        if proximity.pidIsSeeker and proximity.pidIsSeeker(pid) then return "seeker" end
+    end
+
+    return nil
+end
+
 -- Nametag policy requested by user:
 -- - If hideNametagsInRound=true => hide all during round.
 -- - Else, during round:
@@ -702,8 +724,8 @@ function applyNametagPolicyNow()
         if MPVehicleGE.getVehicles then
             for _, v in pairs(MPVehicleGE.getVehicles() or {}) do
                 if type(v) == "table" then
-                    local pid = ownerPidFromVehicleEntry(v)
-                    local isHider = (pid and proximity and proximity.pidIsHider and proximity.pidIsHider(pid)) or false
+                    local tm = teamFromVehicleEntry(v)
+                    local isHider = (tm == "hider")
                     v.hideNametag = not isHider
                 end
             end
@@ -792,15 +814,8 @@ function drawAllSeekerTags()
     for _, sv in pairs(MPVehicleGE.getVehicles() or {}) do
         local vid = tonumber(sv and sv.gameVehicleID)
         if vid and vid ~= myId then
-            local pid = nil
-            local svs = tostring(sv.serverVehicleString or "")
-            local pidStr = svs:match("^(%d+)%-%d+$")
-            if pidStr then pid = tonumber(pidStr) end
-            if (not pid) and proximity.resolveOwnerPlayerIdFromVehId then
-                pid = proximity.resolveOwnerPlayerIdFromVehId(vid)
-            end
-
-            if pid and proximity.pidIsSeeker(pid) then
+            local tm = teamFromVehicleEntry(sv)
+            if tm == "seeker" then
                 local veh = be:getObjectByID(vid)
                 if veh then
                     hunterTagPos:set(be:getObjectOOBBCenterXYZ(vid))
@@ -832,15 +847,8 @@ function drawHiderTags()
     for _, sv in pairs(MPVehicleGE.getVehicles() or {}) do
         local vid = tonumber(sv and sv.gameVehicleID)
         if vid and vid ~= myId then
-            local pid = nil
-            local svs = tostring(sv.serverVehicleString or "")
-            local pidStr = svs:match("^(%d+)%-%d+$")
-            if pidStr then pid = tonumber(pidStr) end
-            if (not pid) and proximity.resolveOwnerPlayerIdFromVehId then
-                pid = proximity.resolveOwnerPlayerIdFromVehId(vid)
-            end
-
-            if pid and proximity.pidIsHider(pid) then
+            local tm = teamFromVehicleEntry(sv)
+            if tm == "hider" then
                 local veh = be:getObjectByID(vid)
                 if veh then
                     hiderTagPos:set(be:getObjectOOBBCenterXYZ(vid))
@@ -1326,7 +1334,7 @@ local function onUpdate(dt)
         local distance = nil
         local intensity = 0
         local maxRange = 0
-        if gameActive and extensions and extensions.vignetteShaderAPI then
+        if gameActive and extensions and extensions.prophuntVignetteAPI then
             if playerTeam == "seeker" and type(getNearestHiderDistance) == 'function' then
                 distance = getNearestHiderDistance()
                 maxRange = seekerFadeDist or 0
