@@ -2006,6 +2006,7 @@ onRoundStart = function(data)
         spawnAndAttachProp(assignedPropName)
         disguisedRoundId = currentRoundId
     end
+    MPVehicleGE.applyQueuedEvents()
 end
 
 onPlayerEliminated = function(data)
