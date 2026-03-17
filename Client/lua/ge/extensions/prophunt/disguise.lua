@@ -237,7 +237,7 @@ end
 local function restoreVehicle(veh, forceGhostOff)
   if not veh then return end
   if forceGhostOff ~= false then
-    pcall(function() veh:queueLuaCommand('obj:setGhostEnabled(false)') end)
+    pcall(function() veh:queueLuaCommand('obj:setGhostEnabled(false)') veh:setMeshAlpha(1, "") end)
   end
   pcall(function() veh:queueLuaCommand('electrics.setIgnitionLevel(3)') end)
   pcall(function()
@@ -257,9 +257,30 @@ function M.preSpawnProp(ctx, propName)
   if mode == "spawnswap" and not spawnswapGuardAllows(ctx) then
     effectiveMode = "replace"
   end
-  if mode ~= "spawnswap" then return end
+  if mode ~= "spawnswap" and mode ~= "preload" then return end
   if ctx.isSpawnswapDisabledForRound and ctx.isSpawnswapDisabledForRound() then return end
   if not spawnswapGuardAllows(ctx) then return end
+
+  local myVeh = be:getPlayerVehicle(0)
+  if not myVeh then return end
+  local myVehId = myVeh:getID()
+  local myPos = myVeh:getPosition()
+  local myRot = myVeh:getRotation()
+  local propRot = (quatFromDir(vec3(myVeh:getDirectionVector()):normalized(), vec3(myVeh:getDirectionVectorUp()):normalized())):toTorqueQuat()
+
+  if ctx.getPropVehId and ctx.getPropVehId() and ctx.isHidePhase and ctx.isHidePhase() then
+    local prop = be:getObjectByID(ctx.getPropVehId())
+    prop:setPosition(myPos)
+    prop:setField('rotation', 0, propRot.x .. " " .. propRot.y .. " " .. propRot.z .. " " .. propRot.w) 
+    myVeh:queueLuaCommand("obj:setGhostEnabled(true)")
+    myVeh:setMeshAlpha(0.125,"")
+  end
+
+  if ctx.isHidePhase and not ctx.isHidePhase() then
+    myVeh:queueLuaCommand("obj:setGhostEnabled(false)")
+    myVeh:setMeshAlpha(1,"")
+  end
+
   if ctx.isPreSpawnAttemptedThisRound and ctx.isPreSpawnAttemptedThisRound() then return end
   if ctx.markPreSpawnAttemptedThisRound then ctx.markPreSpawnAttemptedThisRound() end
 
@@ -267,12 +288,6 @@ function M.preSpawnProp(ctx, propName)
     local existing = be:getObjectByID(ctx.getPropVehId())
     if existing then return end
   end
-
-  local myVeh = be:getPlayerVehicle(0)
-  if not myVeh then return end
-  local myVehId = myVeh:getID()
-  local myPos = myVeh:getPosition()
-  local myRot = myVeh:getRotation()
 
   local modelKey = ensureModelAndLabel(propName)
   if not modelKey then return end
@@ -397,6 +412,9 @@ function M.spawnAndAttachProp(ctx, propName)
   local ok, err
   if effectiveMode == "preload" then
     applyPreloadMask(true)
+    if ctx.getPropVehId and ctx.getPropVehId() then --remove temp prop
+      be:getObjectByID(ctx.getPropVehId()):delete()
+    end
     ok, err = pcall(function() doReplace(modelKey) end)
     applyPreloadMask(false)
   elseif effectiveMode == "spawnswap" then

@@ -353,6 +353,7 @@ local function forceLocalVehicleVisible()
     local veh = be:getPlayerVehicle(0)
     if not veh then return end
     pcall(function() veh:queueLuaCommand('obj:setGhostEnabled(false)') end)
+    pcall(function() veh:setMeshAlpha(1, '') end)
     pcall(function()
         if core_vehicleBridge and core_vehicleBridge.executeAction then
             core_vehicleBridge.executeAction(veh, 'setFreeze', false)
@@ -1801,6 +1802,7 @@ preSpawnIfNeeded = function()
         getPropVehId = function() return propVehId end,
         setPropVehId = function(v) propVehId = v end,
         setOriginalVehId = function(v) originalVehId = v end,
+        isHidePhase = function() return hidePhase end,        
     }, assignedPropName)
 end
 
@@ -1883,6 +1885,7 @@ onHidePhaseStart = function(data)
         })
     end
 
+    MPVehicleGE.applyQueuedEvents()
     print("DEBUG: Hide phase started - " .. hideTimer .. " seconds")
 end
 
@@ -1991,6 +1994,7 @@ onHidePhaseEnd = function(data)
             icon = 'warning'
         })
     end
+    MPVehicleGE.applyQueuedEvents()
     print("DEBUG: Hide phase ended")
 end
 
