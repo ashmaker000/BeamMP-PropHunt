@@ -1,6 +1,59 @@
 local M = {}
 M.BUILD = "2026-02-11-phase2e"
 
+local function resolveMapKey()
+  if not map or not map.getMap then return "unknown" end
+
+  local ok, mapData = pcall(function() return map.getMap() end)
+  if not ok or type(mapData) ~= "table" then return "unknown" end
+
+  local candidates = {
+    mapData.misFilePath,
+    mapData.levelName,
+    mapData.name,
+    mapData.id,
+  }
+
+  for _, raw in ipairs(candidates) do
+    local text = tostring(raw or "")
+    if text ~= "" then
+      local token = text:match("levels[/\\]([^/\\]+)")
+        or text:match("^/levels/([^/\\]+)")
+        or text:match("^levels[/\\]([^/\\]+)")
+        or text:match("([^/\\]+)$")
+      if token and token ~= "" then
+        return tostring(token):lower()
+      end
+    end
+  end
+
+  return "unknown"
+end
+
+local function getPlayerVehicleSnapshot()
+  if not be or not be.getPlayerVehicle then
+    return nil, "Player vehicle API unavailable"
+  end
+
+  local veh = be:getPlayerVehicle(0)
+  if not veh then
+    return nil, "No player vehicle"
+  end
+
+  local pos = veh.getPosition and veh:getPosition() or nil
+  local rot = veh.getRotation and veh:getRotation() or nil
+  if not pos then
+    return nil, "Vehicle position unavailable"
+  end
+
+  return {
+    mapKey = resolveMapKey(),
+    pos = pos,
+    rot = rot,
+    vehId = veh.getID and veh:getID() or nil,
+  }, nil
+end
+
 function M.handleChatMessage(msg, ctx)
   local colonIndex = string.find(msg, ":")
   if not colonIndex then return end
@@ -85,10 +138,35 @@ function M.handleChatMessage(msg, ctx)
       msg = "PropHunt Commands (canonical):\n" ..
             "/ph config <setting> <value> - Configure client distances\n" ..
             "Settings: taunt_dist, proximity, proximity_dist, hiderfadedist, hiderfilterintensity\n" ..
-            "/phtag <playerId> - (seekers) send tag request",
+            "/phtag <playerId> - (seekers) send tag request\n" ..
+            "/phhere - Show current map/coords for spawn-bank setup",
       ttl = 9,
       icon = 'help'
     })
+  elseif cmd == "/phhere" or cmd == "/phcoords" then
+    local snap, err = getPlayerVehicleSnapshot()
+    if not snap then
+      ctx.beamMessage({ msg = "PropHunt location error: " .. tostring(err), ttl = 4, icon = 'error' })
+      return
+    end
+
+    local pos = snap.pos
+    local rot = snap.rot
+    local mapKey = tostring(snap.mapKey or "unknown")
+    local xyz = string.format("%.2f %.2f %.2f", tonumber(pos.x) or 0, tonumber(pos.y) or 0, tonumber(pos.z) or 0)
+    local rotText = rot and string.format("%.4f %.4f %.4f %.4f", tonumber(rot.x) or 0, tonumber(rot.y) or 0, tonumber(rot.z) or 0, tonumber(rot.w) or 1) or "n/a"
+    local seekerCmd = string.format("/ph spawnbank add %s seeker %.2f %.2f %.2f", mapKey, tonumber(pos.x) or 0, tonumber(pos.y) or 0, tonumber(pos.z) or 0)
+    local hiderCmd = string.format("/ph spawnbank add %s hider %.2f %.2f %.2f", mapKey, tonumber(pos.x) or 0, tonumber(pos.y) or 0, tonumber(pos.z) or 0)
+
+    ctx.beamMessage({
+      msg = string.format("Map=%s\nXYZ=%s\nRot=%s", mapKey, xyz, rotText),
+      ttl = 8,
+      icon = 'place'
+    })
+
+    print("[PH] location map=" .. mapKey .. " xyz=" .. xyz .. " rot=" .. rotText .. " vehId=" .. tostring(snap.vehId or "n/a"))
+    print("[PH] spawnbank seeker => " .. seekerCmd)
+    print("[PH] spawnbank hider  => " .. hiderCmd)
   end
 end
 

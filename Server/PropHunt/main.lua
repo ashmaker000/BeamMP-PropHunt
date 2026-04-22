@@ -933,6 +933,29 @@ local function findPlayerIdByNameExact(name)
     return nil
 end
 
+local function describeNextSeekerOverride()
+    if type(gameState.nextSeekers) == "table" then
+        local ids = {}
+        for pid, enabled in pairs(gameState.nextSeekers) do
+            if enabled then
+                ids[#ids + 1] = tonumber(pid) or pid
+            end
+        end
+        table.sort(ids, function(a, b) return tostring(a) < tostring(b) end)
+        if #ids > 0 then
+            local out = {}
+            for _, pid in ipairs(ids) do out[#out + 1] = tostring(pid) end
+            return table.concat(out, ",")
+        end
+    end
+
+    if gameState.nextSeeker ~= nil then
+        return tostring(gameState.nextSeeker)
+    end
+
+    return "auto"
+end
+
 local function showStatus(playerId)
     local active = tostring(gameState.active)
     local phase = tostring(gameState.phase)
@@ -942,7 +965,10 @@ local function showStatus(playerId)
     send(playerId, string.format("Timers: hide=%ds round=%ds", tonumber(gameState.hideTimer or 0), tonumber(gameState.roundTimer or 0)))
     send(playerId, string.format("Config: mode=%s seekerMode=%s seekerCount=%s seekerRatio=%s", tostring(config.mode), tostring(config.seekerMode), tostring(config.seekerCount), tostring(config.seekerRatio)))
     send(playerId, string.format("Config: hideTime=%ds roundTime=%ds joinPolicy=%s disguiseMode=%s forcedProp=%s", tonumber(config.hideTime or 60), tonumber(config.roundTime or 300), tostring(config.joinPolicy or "lock_next_round"), tostring(config.disguiseMode or "replace"), tostring(config.nextRoundForcedProp or "random")))
-    send(playerId, "Note: disguisemode=spawnswap is deprecated/disabled.")
+    send(playerId, string.format("Next round: seekerOverride=%s", describeNextSeekerOverride()))
+    if tostring(config.disguiseMode or ""):lower() == "spawnswap" then
+        send(playerId, "Note: disguisemode=spawnswap is deprecated/disabled.")
+    end
     send(playerId, string.format("Profiles: preset=%s map=%s propTierMode=%s perks=%s", tostring(config.currentPreset or "custom"), tostring(gameState.currentMapKey or "unknown"), tostring(config.propTierMode or "all"), tostring(config.perksEnabled == true)))
     send(playerId, string.format("Visuals: seekerFade=%.1f seekerIntensity=%.2f hiderFade=%.1f hiderIntensity=%.2f", tonumber(config.seekerFadeDist or 120), tonumber(config.seekerFilterIntensity or 1), tonumber(config.hiderFadeDist or 120), tonumber(config.hiderFilterIntensity or 0.35)))
     send(playerId, string.format("Stability: forceGhostOffOnRestore=%s cleanupSweepSeconds=%s spawnswapRetryCount=%s seekerTabPrevention=%s hideNametagsInRound=%s nodeGrab=%s hiderReset=%s", tostring(config.forceGhostOffOnRestore ~= false), tostring(tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15), tostring(tonumber(config.spawnswapRetryCount or 1) or 1), tostring(config.seekerTabPrevention ~= false), tostring(config.hideNametagsInRound ~= false), tostring(config.allowNodeGrabInRound == true), tostring(config.allowHiderResetInRound == true)))
@@ -956,7 +982,7 @@ local function showHelp(playerId)
     send(playerId, "  /ph stop - Stop game")
     send(playerId, "  /ph status - Round + config status")
     send(playerId, "  /ph points [playerID] - economy/perk status")
-    send(playerId, "  /ph players - List player IDs")
+    send(playerId, "  /ph players - List player IDs + PropHunt state")
     send(playerId, "  /ph seeker <playerID> - Set next seeker (next round)")
     send(playerId, "  /ph seekers <id1> <id2> ... - Set seekers for next round (multiple)")
     send(playerId, "  /ph seekername <username> - Set next seeker by exact username")
@@ -1152,7 +1178,18 @@ function PropHunt_onChatMessage(playerId, playerName, message)
         local players = MP.GetPlayers()
         send(playerId, "Connected Players:")
         for pid, pname in pairs(players) do
-            send(playerId, "  ID " .. tostring(pid) .. ": " .. tostring(pname))
+            local pdata = gameState.players[pid]
+            local econ = gameState.economy[pid]
+            local teamLabel = pdata and tostring(pdata.team or "unknown") or "waiting"
+            local aliveLabel = pdata and ((pdata.alive == true) and "alive" or "out") or "n/a"
+            local points = econ and tonumber(econ.points or 0) or 0
+            local perks = {}
+            if econ and econ.perks then
+                if econ.perks.quickScan then perks[#perks + 1] = "quickScan" end
+                if econ.perks.stealthTaunt then perks[#perks + 1] = "stealthTaunt" end
+            end
+            local perkLabel = (#perks > 0) and table.concat(perks, "|") or "-"
+            send(playerId, string.format("  ID %s: %s | team=%s | alive=%s | points=%d | perks=%s", tostring(pid), tostring(pname), teamLabel, aliveLabel, points, perkLabel))
         end
         return 1
     elseif msg == "/phstatus" then
