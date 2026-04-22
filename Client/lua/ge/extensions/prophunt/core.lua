@@ -173,6 +173,9 @@ local onSpawnHint
 local onTempPropClear
 local onTempPropClearOwner
 local onForceSync
+local onDecoyPlace
+local onDecoyDenied
+local manualDecoy
 local hardClearAllTempProps
 local cleanupTempSpawnSwapProps
 local clearTempPropByServerString
@@ -182,6 +185,7 @@ local requestStateBurst
 -- Forward declare helpers used by scan logic
 local resolveOwnerPlayerIdFromVehId
 local getNearestHiderDistance
+local getNearestHiderInfo
 local getNearestSeekerDistance
 local closestHunterInfo = {}
 local ffiAvailable = (ffi and ffi.C and ffi.C.BNG_DBG_DRAW_TextAdvanced)
@@ -268,6 +272,8 @@ local function onExtensionLoaded()
         onHiderList = onHiderList,
         onSeekerList = onSeekerList,
         onScanPulse = onScanPulse,
+        onDecoyPlace = onDecoyPlace,
+        onDecoyDenied = onDecoyDenied,
         onTeamUpdate = onTeamUpdate,
         onSettings = onSettings,
         onHudPulse = onHudPulse,
@@ -2269,6 +2275,7 @@ onChatMessage = function(msg)
 
         setHiderFilterIntensity = function(v) hiderFilterIntensity = v end,
         getHiderFilterIntensity = function() return hiderFilterIntensity end,
+        manualDecoy = manualDecoy,
     })
 end
 
@@ -2289,6 +2296,13 @@ getNearestHiderDistance = function()
         return proximity.getNearestHiderDistance()
     end
     return nil
+end
+
+getNearestHiderInfo = function()
+    if proximity and proximity.getNearestHiderInfo then
+        return proximity.getNearestHiderInfo()
+    end
+    return nil, {}
 end
 
 getNearestSeekerDistance = function()
@@ -2342,6 +2356,69 @@ onHiderList = function(data)
     end
 end
 
+local function getVehicleForwardVector(veh)
+    if not veh then return nil end
+    if veh.getDirectionVector then
+        local ok, dir = pcall(function() return veh:getDirectionVector() end)
+        if ok and dir then return dir end
+    end
+    if veh.getRotation then
+        local ok, rot = pcall(function() return veh:getRotation() end)
+        if ok and rot then
+            local x = tonumber(rot.x) or 0
+            local y = tonumber(rot.y) or 0
+            local z = tonumber(rot.z) or 0
+            local w = tonumber(rot.w) or 1
+            return {
+                x = 2 * (x * z + w * y),
+                y = 2 * (y * z - w * x),
+                z = 1 - 2 * (x * x + y * y)
+            }
+        end
+    end
+    return nil
+end
+
+local function getScanDirectionLabel(targetInfo)
+    if not targetInfo or not targetInfo.pos then return nil end
+    local veh = be:getPlayerVehicle(0)
+    if not veh or not veh.getPosition then return nil end
+    local myPos = veh:getPosition()
+    if not myPos then return nil end
+
+    local forward = getVehicleForwardVector(veh)
+    if not forward then return nil end
+
+    local dx = (tonumber(targetInfo.pos.x) or 0) - (tonumber(myPos.x) or 0)
+    local dy = (tonumber(targetInfo.pos.y) or 0) - (tonumber(myPos.y) or 0)
+    local fx = tonumber(forward.x) or 0
+    local fy = tonumber(forward.y) or 0
+    local dLen = math.sqrt(dx * dx + dy * dy)
+    local fLen = math.sqrt(fx * fx + fy * fy)
+    if dLen < 0.001 or fLen < 0.001 then return nil end
+
+    dx, dy = dx / dLen, dy / dLen
+    fx, fy = fx / fLen, fy / fLen
+
+    local dot = fx * dx + fy * dy
+    local cross = fx * dy - fy * dx
+    local side = nil
+    if math.abs(cross) > 0.30 then
+        side = (cross > 0) and "left" or "right"
+    end
+
+    if dot > 0.75 then
+        return side and ("front-" .. side) or "ahead"
+    elseif dot < -0.75 then
+        return side and ("back-" .. side) or "behind"
+    elseif side then
+        return side
+    elseif dot >= 0 then
+        return "ahead"
+    end
+    return "behind"
+end
+
 onScanPulse = function(data)
     -- data: roundId
     if playerTeam ~= "seeker" then return end
@@ -2350,16 +2427,39 @@ onScanPulse = function(data)
     local rid = tonumber(data)
     if rid then currentRoundId = rid end
 
-    local d = getNearestHiderDistance()
+    local d, info = getNearestHiderInfo()
     local s = strengthFromDistance(d)
+    local direction = getScanDirectionLabel(info)
 
     if d then
-        beamMessage({ msg = string.format("SCAN: signal %.0f%%", s * 100), ttl = 1.5, icon = 'radar' })
+        local msg = string.format("SCAN: signal %.0f%%", s * 100)
+        if direction and direction ~= "" then
+            msg = msg .. " " .. direction
+        end
+        beamMessage({ msg = msg, ttl = 1.5, icon = 'radar' })
     else
         beamMessage({ msg = "SCAN: no signal", ttl = 1.5, icon = 'radar' })
     end
 
     playScannerBeep(s)
+end
+
+onDecoyPlace = function(data)
+    local ridStr, propKey = tostring(data or ""):match("^%s*(%d+)%s*,%s*([^,]+)%s*$")
+    local rid = tonumber(ridStr)
+    if rid and currentRoundId and rid ~= currentRoundId then return end
+    if not propKey or propKey == "" then return end
+    disguiseMod.spawnDecoyProp({
+        beamMessage = beamMessage,
+        getPlayerTeam = function() return playerTeam end,
+        getCurrentRoundId = function() return currentRoundId end
+    }, propKey)
+end
+
+onDecoyDenied = function(data)
+    local reason = tostring(data or "")
+    if reason == "" then reason = "Decoy unavailable" end
+    beamMessage({ msg = "DECOY: " .. reason, ttl = 2.5, icon = 'info' })
 end
 
 onSettings = function(data)
@@ -2746,6 +2846,25 @@ local function manualScan()
     end
 end
 
+manualDecoy = function()
+    if playerTeam ~= "hider" then
+        beamMessage({ msg = "Decoy is hiders-only", ttl = 2, icon = 'info' })
+        return
+    end
+    if not gameActive or hidePhase then
+        beamMessage({ msg = "Can't place decoy yet", ttl = 2, icon = 'timer' })
+        return
+    end
+    if not assignedPropName or assignedPropName == "" then
+        beamMessage({ msg = "No prop assigned yet", ttl = 2, icon = 'error' })
+        return
+    end
+    if TriggerServerEvent then
+        TriggerServerEvent("PropHunt_DecoyRequest", "")
+        beamMessage({ msg = "DECOY: request sent...", ttl = 1.0, icon = 'category' })
+    end
+end
+
 -- --- EXPORTS ---
 M.onExtensionLoaded = onExtensionLoaded
 M.onUpdate = onUpdate
@@ -2778,6 +2897,7 @@ M.setProp = setProp
 M.performSwap = performSwap
 M.manualTaunt = manualTaunt
 M.manualScan = manualScan
+M.manualDecoy = manualDecoy
 M.playSound = playSound
 M.getPropID = function() return propID end
 

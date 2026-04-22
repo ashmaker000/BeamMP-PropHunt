@@ -135,14 +135,21 @@ function M.handleChatMessage(msg, ctx)
     end
   elseif cmd == "/phhelp" then
     ctx.beamMessage({
-      msg = "PropHunt Commands (canonical):\n" ..
-            "/ph config <setting> <value> - Configure client distances\n" ..
-            "Settings: taunt_dist, proximity, proximity_dist, hiderfadedist, hiderfilterintensity\n" ..
-            "/phtag <playerId> - (seekers) send tag request\n" ..
-            "/phhere - Show current map/coords for spawn-bank setup",
+        msg = "PropHunt Commands (canonical):\n" ..
+          "/ph config <setting> <value> - Configure client distances\n" ..
+          "Settings: taunt_dist, proximity, proximity_dist, hiderfadedist, hiderfilterintensity\n" ..
+          "/phtag <playerId> - (seekers) send tag request\n" ..
+          "/phhere - Show current map/coords for spawn-bank setup\n" ..
+          "/phdecoy - (hiders) place your decoy prop",
       ttl = 9,
       icon = 'help'
     })
+  elseif cmd == "/phdecoy" then
+    if ctx.manualDecoy then
+      ctx.manualDecoy()
+    else
+      ctx.beamMessage({ msg = "PropHunt decoy unavailable", ttl = 3, icon = 'error' })
+    end
   elseif cmd == "/phhere" or cmd == "/phcoords" then
     local snap, err = getPlayerVehicleSnapshot()
     if not snap then

@@ -36,6 +36,10 @@ local function scan()
     safeCall("manualScan")
 end
 
+local function decoy()
+    safeCall("manualDecoy")
+end
+
 local function onExtensionLoaded()
     print("DEBUG: PropHuntKeybinds extension loaded")
 end
@@ -46,5 +50,6 @@ M.setProp = setProp
 M.performSwap = performSwap
 M.taunt = taunt
 M.scan = scan
+M.decoy = decoy
 
 return M

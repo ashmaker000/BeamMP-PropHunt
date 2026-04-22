@@ -247,6 +247,29 @@ local function restoreVehicle(veh, forceGhostOff)
   end)
 end
 
+local function getForwardVector(veh)
+  if not veh then return nil end
+  if veh.getDirectionVector then
+    local ok, dir = pcall(function() return veh:getDirectionVector() end)
+    if ok and dir then return dir end
+  end
+  if veh.getRotation then
+    local ok, rot = pcall(function() return veh:getRotation() end)
+    if ok and rot then
+      local x = tonumber(rot.x) or 0
+      local y = tonumber(rot.y) or 0
+      local z = tonumber(rot.z) or 0
+      local w = tonumber(rot.w) or 1
+      return {
+        x = 2 * (x * z + w * y),
+        y = 2 * (y * z - w * x),
+        z = 1 - 2 * (x * x + y * y)
+      }
+    end
+  end
+  return { x = 0, y = 1, z = 0 }
+end
+
 function M.preSpawnProp(ctx, propName)
   if ctx.getPlayerTeam and ctx.getPlayerTeam() ~= "hider" then return end
   local mode = (ctx.getDisguiseMode and tostring(ctx.getDisguiseMode() or "replace"):lower()) or "replace"
@@ -308,6 +331,72 @@ function M.preSpawnProp(ctx, propName)
   reportTempPropServerString(ctx, newId, 8.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
 
   print("DEBUG: PRESPAWN_OK propId=" .. tostring(newId) .. " originalId=" .. tostring(myVehId))
+end
+
+function M.spawnDecoyProp(ctx, propName)
+  if ctx.getPlayerTeam and ctx.getPlayerTeam() ~= "hider" then return false, "hiders_only" end
+  local modelKey = tostring(propName or "")
+  if modelKey == "" then return false, "missing_prop" end
+
+  local myVeh = be:getPlayerVehicle(0)
+  if not myVeh or not myVeh.getPosition then
+    if ctx.beamMessage then
+      ctx.beamMessage({ msg = "Decoy failed: no player vehicle", ttl = 3, icon = 'error' })
+    end
+    return false, "no_vehicle"
+  end
+
+  local myPos = myVeh:getPosition()
+  local myRot = myVeh.getRotation and myVeh:getRotation() or nil
+  if not myPos then return false, "no_position" end
+
+  local newId, errSpawn = spawnPropVehicle(modelKey)
+  if not newId then
+    if ctx.beamMessage then
+      ctx.beamMessage({ msg = "Decoy failed: " .. tostring(errSpawn or "spawn failed"), ttl = 4, icon = 'error' })
+    end
+    return false, errSpawn or "spawn_failed"
+  end
+
+  local newVeh = be:getObjectByID(newId)
+  if not newVeh then return false, "spawn_missing" end
+
+  local forward = getForwardVector(myVeh) or { x = 0, y = 1, z = 0 }
+  local fx = tonumber(forward.x) or 0
+  local fy = tonumber(forward.y) or 1
+  local flen = math.sqrt(fx * fx + fy * fy)
+  if flen < 0.001 then
+    fx, fy, flen = 0, 1, 1
+  end
+  fx, fy = fx / flen, fy / flen
+
+  if myRot and newVeh.setPositionRotation then
+    pcall(function()
+      newVeh:setPositionRotation(
+        (tonumber(myPos.x) or 0) - fx * 4.0,
+        (tonumber(myPos.y) or 0) - fy * 4.0,
+        (tonumber(myPos.z) or 0) + 0.2,
+        tonumber(myRot.x) or 0,
+        tonumber(myRot.y) or 0,
+        tonumber(myRot.z) or 0,
+        tonumber(myRot.w) or 1
+      )
+    end)
+  end
+
+  pcall(function() newVeh:queueLuaCommand('electrics.setIgnitionLevel(0)') end)
+  pcall(function() newVeh:queueLuaCommand('obj:setGhostEnabled(true)') end)
+  pcall(function()
+    if core_vehicleBridge and core_vehicleBridge.executeAction then
+      core_vehicleBridge.executeAction(newVeh, 'setFreeze', true)
+    end
+  end)
+
+  reportTempPropServerString(ctx, newId, 8.0, ctx.getCurrentRoundId and ctx.getCurrentRoundId() or nil)
+  if ctx.beamMessage then
+    ctx.beamMessage({ msg = "Decoy placed", ttl = 2.5, icon = 'category' })
+  end
+  return true
 end
 
 function M.spawnAndAttachProp(ctx, propName)
