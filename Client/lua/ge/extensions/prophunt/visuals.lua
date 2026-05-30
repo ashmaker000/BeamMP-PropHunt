@@ -29,10 +29,11 @@ function M.setSeekerVisualBlock(state)
     if seekerVisualBlockActive then
       if claimVignetteOwner() then
         extensions.prophuntVignetteAPI.setEnabled(true)
-        -- Full-screen blackout (same trick as flashbang, but black).
+        -- Full-screen dark cover. Keep it slightly transparent so it reads as
+        -- an obscured view instead of the old hard black screen.
         extensions.prophuntVignetteAPI.setInnerRadius(0.0)
         extensions.prophuntVignetteAPI.setOuterRadius(0.0)
-        extensions.prophuntVignetteAPI.setColor(Point4F(0, 0, 0, 1.0))
+        extensions.prophuntVignetteAPI.setColor(Point4F(0, 0, 0, 0.88))
       end
     else
       if getVignetteOwner() == VIGNETTE_OWNER_ID then

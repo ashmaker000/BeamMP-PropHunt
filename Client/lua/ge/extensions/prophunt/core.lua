@@ -26,6 +26,7 @@ local commandMod = requireMod("ge.extensions.prophunt.commands", "ge/extensions/
 local networkMod = requireMod("ge.extensions.prophunt.network", "ge/extensions/prophunt/network")
 local disguiseMod = requireMod("ge.extensions.prophunt.disguise", "ge/extensions/prophunt/disguise")
 local proximityFactory = requireMod("ge.extensions.prophunt.proximity", "ge/extensions/prophunt/proximity")
+local taggingFactory = requireMod("ge.extensions.prophunt.tagging", "ge/extensions/prophunt/tagging")
 local phAudio = audioFactory.new({
     tauntDir = TAUNT_SOUNDS_DIR,
     tauntDistance = TAUNT_SOUND_DISTANCE,
@@ -63,6 +64,7 @@ local propStateRequestedRound = nil
 
 -- proximity state/queries moved to prophunt/proximity.lua
 local proximity = nil
+local tagging = nil
 
 -- Seeker proximity vignette settings (server-sent)
 local seekerFadeDist = 120
@@ -78,7 +80,7 @@ local spawnswapDisabledRound = nil
 local spawnswapDisabledReason = nil
 local preSpawnAttemptedRound = nil
 local cleanupSweepSeconds = 15
-local seekerTabPrevention = true
+local seekerTabPrevention = false
 local allowNodeGrabInRound = false
 local allowHiderResetInRound = false
 local hideNametagsInRound = true
@@ -95,8 +97,6 @@ local actionFilterHiderActive = false
 local topCameraResolvedName = nil
 local topCameraResolveAttempted = false
 local globalBlockedActions = {
-    "freeCamera", "toggleFreeCamera", "cameraFree",
-    "dropPlayerAtCamera", "dropPlayerAtCameraNoReset",
     "nodeGrabber", "nodegrabber", "nodegrabberGrab", "nodegrabberRotate", "nodegrabberTranslate"
 }
 local hiderBlockedActions = {
@@ -107,7 +107,6 @@ local hiderBlockedActions = {
     "funStuffBoost", "funStuffJump", "vehicleDebugBoost", "arcadeBoost"
 }
 local movingResetBlockedActions = {
-    "dropPlayerAtCamera", "dropPlayerAtCameraNoReset",
     "recover", "recover_vehicle", "recover_vehicle_alt", "recover_to_last_road",
     "reset_physics", "reset_all_physics", "reload_vehicle", "reload_all_vehicles"
 }
@@ -120,11 +119,14 @@ local lastMovementPos = vec3()
 local lastMovementPosReady = false
 local lastHudPulseMsgAt = 0
 local lastHudPulseKey = ""
+local lastSeekerBlackoutTitleAt = -999
 local postRoundCleanupUntil = 0
 local lastNametagEnforceAt = 0
 local lastPostRoundCleanupSweepAt = 0
 local pendingHardDelete = {} -- serverVehicleString -> dueTime
 local hardNametagMaskActive = false
+local noRoleTagPidSet = {}
+local taggedOutLocalRound = nil
 
 -- Round identity (server-sent) + idempotency
 local currentRoundId = nil
@@ -141,6 +143,7 @@ local lastStateRequestAt = 0
 local hideVisualTask = nil
 local hideCameraTask = nil
 local cameraLockEnabled = false
+local applyHideCameraLock
 local originalCommandSetGameCamera = nil
 local originalCoreCameraSetByName = nil
 local originalCoreCameraSetCameraByName = nil
@@ -157,6 +160,7 @@ local onHidePhaseEnd
 local onRoundStart
 local onRoundEnd
 local onPlayerEliminated
+local onTaggedPlayer
 local onAssignProp
 local onChatMessage
 local onHiderList
@@ -173,9 +177,6 @@ local onSpawnHint
 local onTempPropClear
 local onTempPropClearOwner
 local onForceSync
-local onDecoyPlace
-local onDecoyDenied
-local manualDecoy
 local hardClearAllTempProps
 local cleanupTempSpawnSwapProps
 local clearTempPropByServerString
@@ -185,7 +186,6 @@ local requestStateBurst
 -- Forward declare helpers used by scan logic
 local resolveOwnerPlayerIdFromVehId
 local getNearestHiderDistance
-local getNearestHiderInfo
 local getNearestSeekerDistance
 local closestHunterInfo = {}
 local ffiAvailable = (ffi and ffi.C and ffi.C.BNG_DBG_DRAW_TextAdvanced)
@@ -267,13 +267,12 @@ local function onExtensionLoaded()
         onRoundStart = onRoundStart,
         onRoundEnd = onRoundEnd,
         onPlayerEliminated = onPlayerEliminated,
+        onTaggedPlayer = onTaggedPlayer,
         onAssignProp = onAssignProp,
         onChatMessage = onChatMessage,
         onHiderList = onHiderList,
         onSeekerList = onSeekerList,
         onScanPulse = onScanPulse,
-        onDecoyPlace = onDecoyPlace,
-        onDecoyDenied = onDecoyDenied,
         onTeamUpdate = onTeamUpdate,
         onSettings = onSettings,
         onHudPulse = onHudPulse,
@@ -303,6 +302,22 @@ local function setSeekerVisualBlock(state)
     visuals.setSeekerVisualBlock(state)
 end
 
+local function setSeekerHideBlur(state)
+    if extensions and not extensions.prophuntBlurAPI and extensions.load then
+        pcall(function() extensions.load("prophuntBlurAPI") end)
+    end
+    if not (extensions and extensions.prophuntBlurAPI) then return end
+
+    if state then
+        pcall(function()
+            extensions.prophuntBlurAPI.setStrength(3.0)
+            extensions.prophuntBlurAPI.setEnabled(true)
+        end)
+    else
+        pcall(function() extensions.prophuntBlurAPI.reset() end)
+    end
+end
+
 local function setProximityVignette(strength, intensity)
     visuals.setProximityVignette(strength, intensity)
 end
@@ -320,38 +335,66 @@ local function clearSeekerBlackoutFallback()
     end
 end
 
-local function forceSeekerBlackoutNow()
-    if not (hidePhase and playerTeam == "seeker") then return end
-
-    if extensions and not extensions.prophuntVignetteAPI and extensions.load then
-        pcall(function() extensions.load("prophuntVignetteAPI") end)
-    end
-    if extensions and not extensions.prophuntBlurAPI and extensions.load then
-        pcall(function() extensions.load("prophuntBlurAPI") end)
-    end
-
-    if extensions and extensions.prophuntVignetteAPI then
-        pcall(function()
-            extensions.prophuntVignetteAPI.setEnabled(true)
-            extensions.prophuntVignetteAPI.setInnerRadius(0.0)
-            extensions.prophuntVignetteAPI.setOuterRadius(0.0)
-            extensions.prophuntVignetteAPI.setColor(Point4F(0, 0, 0, 1.0))
-        end)
-    end
-
-    if extensions and extensions.prophuntBlurAPI then
-        pcall(function()
-            extensions.prophuntBlurAPI.setStrength(3.0)
-            extensions.prophuntBlurAPI.setEnabled(true)
-        end)
-    end
-
-    -- Fallback for builds where vignette pipeline is unreliable:
-    -- force full-screen darkening through combine pass.
+local function setSeekerScreenCoverFallback(state)
     local fx = getCombinePassFX()
-    if fx and fx.setField then
+    if not (fx and fx.setField) then return end
+
+    if state then
         pcall(function() fx:setField("enableBlueShift", 0, 1) end)
         pcall(function() fx:setField("blueShiftColor", 0, "0 0 0") end)
+    else
+        clearSeekerBlackoutFallback()
+    end
+end
+
+local function showSeekerBlackoutTitle(force)
+    if not (hidePhase and playerTeam == "seeker") then return end
+
+    local t = os.clock and os.clock() or 0
+    if not force and (t - lastSeekerBlackoutTitleAt) < 0.95 then return end
+    lastSeekerBlackoutTitleAt = t
+
+    if guihooks and guihooks.trigger then
+        -- Some BeamMP UI layouts do not show ScenarioFlashMessage reliably.
+        -- Send redundant UI events so seekers always get at least one visible warning.
+        pcall(function() guihooks.trigger('ScenarioFlashMessage', {{"YOU ARE SEEKER", 1.45, 0, false}}) end)
+        pcall(function() guihooks.trigger('ScenarioRealtimeDisplay', {msg = "YOU ARE SEEKER"}) end)
+        pcall(function() guihooks.trigger('Message', {msg = "YOU ARE SEEKER", ttl = 1.6, category = "warning", icon = "visibility"}) end)
+    end
+    if guihooks and guihooks.message then
+        guihooks.message({txt = "YOU ARE SEEKER"}, 1.1, "warning")
+    end
+end
+
+local function releaseSeekerHidePhaseLock(showMessage)
+    local playerVeh = be:getPlayerVehicle(0)
+    if playerVeh and core_vehicleBridge and core_vehicleBridge.executeAction then
+        core_vehicleBridge.executeAction(playerVeh, 'setFreeze', false)
+        print("DEBUG: Seeker vehicle unfrozen - hunt begins!")
+    end
+
+    setSeekerVisualBlock(false)
+    setSeekerHideBlur(false)
+    setSeekerScreenCoverFallback(false)
+    if guihooks and guihooks.trigger then
+        pcall(function() guihooks.trigger('ScenarioFlashMessageClear') end)
+        pcall(function() guihooks.trigger('ScenarioRealtimeDisplay', {msg = ""}) end)
+    end
+    applyHideCameraLock(false)
+    if hideVisualTask then hideVisualTask = nil end
+    if hideCameraTask then hideCameraTask = nil end
+
+    -- Return camera to orbit when round starts.
+    pcall(function()
+        if commands and commands.setGameCamera then
+            commands.setGameCamera('orbit')
+        elseif core_camera and core_camera.setByName then
+            core_camera.setByName('orbit')
+        end
+    end)
+
+    if showMessage then
+        beamMessage({ msg = "Hunt begins NOW!", ttl = 3, icon = 'visibility' })
     end
 end
 
@@ -442,7 +485,10 @@ local function enforceSeekerHideTopCamera()
 end
 
 function shouldAllowHiderResetNow()
-    return (gameActive == true and playerTeam == "hider" and hidePhase == true)
+    if gameActive ~= true then return true end
+    if playerTeam ~= "hider" then return true end
+    if taggedOutLocalRound and currentRoundId and taggedOutLocalRound == currentRoundId then return false end
+    return (hidePhase == true and disguisedThisRound ~= true)
 end
 
 local function enforceHiderAbilityLock()
@@ -452,7 +498,7 @@ local function enforceHiderAbilityLock()
     local cmd = [[
       if input and input.event then
         local kill = {
-          'boost','jump','dropPlayerAtCameraNoReset'
+          'boost','jump'
         }
         for _, a in ipairs(kill) do input.event(a, 0, 2) end
       end
@@ -531,10 +577,6 @@ local function enforceGlobalCheatKeyLock()
     if not gameActive then return end
     pcall(function()
       if input and input.event then
-        input.event('freeCamera', 0, 2)
-        input.event('toggleFreeCamera', 0, 2)
-        input.event('dropPlayerAtCamera', 0, 2)
-        input.event('dropPlayerAtCameraNoReset', 0, 2)
         if not allowNodeGrabInRound then input.event('nodeGrabber', 0, 2) end
       end
     end)
@@ -544,7 +586,7 @@ local function enforceMovingResetLock(dt)
     if not core_input_actionFilter then return end
     local shouldBlock = false
 
-    if shouldAllowHiderResetNow() then
+    if shouldAllowHiderResetNow() or playerTeam == "seeker" then
         shouldBlock = false
     elseif gameActive and disableResetsWhenMoving then
         local veh = be:getPlayerVehicle(0)
@@ -679,7 +721,14 @@ end
 local function teamFromVehicleEntry(v)
     if type(v) ~= "table" then return nil end
 
-    -- Primary authority: server-synced gamestate by ownerName.
+    -- Primary authority: server-sent team ID lists.
+    local pid = ownerPidFromVehicleEntry(v)
+    if pid and proximity then
+        if proximity.pidIsHider and proximity.pidIsHider(pid) then return "hider" end
+        if proximity.pidIsSeeker and proximity.pidIsSeeker(pid) then return "seeker" end
+    end
+
+    -- Fallback: server-synced gamestate by ownerName when pid mapping is unavailable.
     local ownerName = tostring(v.ownerName or "")
     if ownerName ~= "" and gamestate and type(gamestate.players) == "table" then
         local p = gamestate.players[ownerName]
@@ -688,14 +737,13 @@ local function teamFromVehicleEntry(v)
         end
     end
 
-    -- Fallback: proximity pid lookup when name mapping is unavailable.
-    local pid = ownerPidFromVehicleEntry(v)
-    if pid and proximity then
-        if proximity.pidIsHider and proximity.pidIsHider(pid) then return "hider" end
-        if proximity.pidIsSeeker and proximity.pidIsSeeker(pid) then return "seeker" end
-    end
-
     return nil
+end
+
+local function shouldDrawRoleTagForVehicleEntry(v)
+    local pid = ownerPidFromVehicleEntry(v)
+    if pid and noRoleTagPidSet[pid] == true then return false end
+    return true
 end
 
 -- Nametag policy requested by user:
@@ -822,7 +870,7 @@ function drawAllSeekerTags()
         local vid = tonumber(sv and sv.gameVehicleID)
         if vid and vid ~= myId then
             local tm = teamFromVehicleEntry(sv)
-            if tm == "seeker" then
+            if tm == "seeker" and shouldDrawRoleTagForVehicleEntry(sv) then
                 local veh = be:getObjectByID(vid)
                 if veh then
                     hunterTagPos:set(be:getObjectOOBBCenterXYZ(vid))
@@ -855,7 +903,7 @@ function drawHiderTags()
         local vid = tonumber(sv and sv.gameVehicleID)
         if vid and vid ~= myId then
             local tm = teamFromVehicleEntry(sv)
-            if tm == "hider" then
+            if tm == "hider" and shouldDrawRoleTagForVehicleEntry(sv) then
                 local veh = be:getObjectByID(vid)
                 if veh then
                     hiderTagPos:set(be:getObjectOOBBCenterXYZ(vid))
@@ -905,6 +953,20 @@ end
 proximity = proximityFactory.new({
     setRoundId = function(rid) currentRoundId = rid end,
     hunterNameForPid = hunterNameForPid
+})
+
+tagging = taggingFactory.new({
+    getGameActive = function() return gameActive end,
+    isHidePhase = function() return hidePhase end,
+    getPlayerTeam = function() return playerTeam end,
+    getCurrentRoundId = function() return currentRoundId end,
+    beamMessage = beamMessage,
+    resolveOwnerPlayerIdFromVehId = function(vehId)
+        if proximity and proximity.resolveOwnerPlayerIdFromVehId then
+            return proximity.resolveOwnerPlayerIdFromVehId(vehId)
+        end
+        return nil
+    end
 })
 
 local function notifyNearestHunter()
@@ -1000,7 +1062,7 @@ ensureVehicleExtensionsLoaded = function(gameRunning)
     end
 end
 
-local function applyHideCameraLock(enable)
+applyHideCameraLock = function(enable)
     if enable and not cameraLockEnabled then
         cameraLockEnabled = true
         if commands and commands.setGameCamera then
@@ -1137,17 +1199,25 @@ local function performSwap()
 end
 
 -- --- TAUNT ---
+local function canLocalTauntAsProp()
+    if not gameActive or hidePhase then return false end
+    if playerTeam ~= "hider" then return false end
+    if currentRoundId and localEliminatedRestoreRound == currentRoundId then return false end
+    if not (disguisedThisRound == true and currentRoundId and disguisedRoundId == currentRoundId) then return false end
+    return true
+end
+
 local function triggerTaunt()
-    -- Prefer propID (when you're hidden), but allow taunting any time by falling back
-    -- to the player's current vehicle.
-    local veh = nil
-    if propID then
-        veh = be:getObjectByID(propID)
+    if not canLocalTauntAsProp() then
+        beamMessage({ msg = "Taunts are hider-prop only", ttl = 2, icon = 'block' })
+        return false
     end
+
+    local veh = be:getPlayerVehicle(0)
     if not veh then
-        veh = be:getPlayerVehicle(0)
+        beamMessage({ msg = "No prop vehicle for taunt", ttl = 2, icon = 'warning' })
+        return false
     end
-    if not veh then return end
 
     local vehId = veh:getID()
 
@@ -1163,11 +1233,13 @@ local function triggerTaunt()
         end
         TriggerServerEvent("PropHunt_TauntRequest", tostring(payload or vehId))
     end
+    return true
 end
 
 local function manualTaunt()
-    triggerTaunt()
-    tauntTimer = tauntIntervalSeconds
+    if triggerTaunt() then
+        tauntTimer = tauntIntervalSeconds
+    end
 end
 
 -- --- UPDATE LOOP ---
@@ -1273,46 +1345,6 @@ local function onUpdate(dt)
         end
     end
 
-    -- TAB prevention: block switching into non-owned vehicles during active round.
-    -- Applied to all roles to prevent remote-vehicle tab races / forced spawns.
-    if gameActive and seekerTabPrevention then
-        local veh = be:getPlayerVehicle(0)
-        if veh then
-            local vid = veh:getID()
-            local own = true
-            if MPVehicleGE and MPVehicleGE.isOwn then
-                local okOwn, isOwn = pcall(function() return MPVehicleGE.isOwn(vid) end)
-                if okOwn and isOwn ~= nil then own = (isOwn == true) end
-            end
-
-            if own then
-                seekerLockedVehId = vid
-            else
-                local target = seekerLockedVehId and be:getObjectByID(seekerLockedVehId) or nil
-                if not target and MPVehicleGE and MPVehicleGE.getVehicles and MPVehicleGE.isOwn then
-                    for _, v in pairs(MPVehicleGE.getVehicles() or {}) do
-                        local gvid = tonumber(v and v.gameVehicleID)
-                        if gvid and MPVehicleGE.isOwn(gvid) then
-                            target = be:getObjectByID(gvid)
-                            if target then
-                                seekerLockedVehId = gvid
-                                break
-                            end
-                        end
-                    end
-                end
-                if target then
-                    pcall(function() be:enterVehicle(0, target) end)
-                    local t = os.clock and os.clock() or 0
-                    if (t - lastSeekerTabWarnAt) > 1.5 then
-                        lastSeekerTabWarnAt = t
-                        beamMessage({ msg = "TAB switch blocked", ttl = 1.2, icon = 'block' })
-                    end
-                end
-            end
-        end
-    end
-
     if hidePhase and playerTeam == "hider" then
         preSpawnIfNeeded()
     end
@@ -1323,7 +1355,9 @@ local function onUpdate(dt)
         if playerVeh and core_vehicleBridge and core_vehicleBridge.executeAction then
             core_vehicleBridge.executeAction(playerVeh, 'setFreeze', true)
         end
-        setSeekerVisualBlock(true)
+        setSeekerScreenCoverFallback(true)
+        setSeekerHideBlur(true)
+        showSeekerBlackoutTitle(false)
 
         -- Re-apply topDown camera during hide phase (prevents reset/mode changes)
         pcall(function()
@@ -1362,12 +1396,9 @@ local function onUpdate(dt)
 
         local strength = strengthFromDistance(distance, maxRange)
         setProximityVignette(strength, intensity)
-    else
+    elseif not (hidePhase and playerTeam == "seeker") then
         setProximityVignette(0, 0)
     end
-
-    -- Hard-override: seeker hide phase must remain fully black every frame.
-    forceSeekerBlackoutNow()
 
     -- AUTO TAUNT
     -- Keep nametag visibility policy sticky (BeamMP UI refresh can revert it).
@@ -1480,6 +1511,8 @@ local function resetRoundState(roundId)
     spawnswapDisabledRound = nil
     spawnswapDisabledReason = nil
     preSpawnAttemptedRound = nil
+    noRoleTagPidSet = {}
+    taggedOutLocalRound = nil
 end
 
 local function logCommandUsage(cmd, details)
@@ -1616,6 +1649,8 @@ onGameEnd = function(data)
     gameActive = false
     disguisedThisRound = false
     disguisedRoundId = nil
+    noRoleTagPidSet = {}
+    taggedOutLocalRound = nil
     gameTimer = 0
     lastGameTimer = 0 -- reset timer tracking
     hidePhase = false
@@ -1626,7 +1661,12 @@ onGameEnd = function(data)
     lastLegalPlayerRot = nil
 
     setSeekerVisualBlock(false)
+    setSeekerHideBlur(false)
     clearSeekerBlackoutFallback()
+    if guihooks and guihooks.trigger then
+        pcall(function() guihooks.trigger('ScenarioFlashMessageClear') end)
+        pcall(function() guihooks.trigger('ScenarioRealtimeDisplay', {msg = ""}) end)
+    end
 
     -- Best-effort: restore a normal camera at end
     pcall(function()
@@ -1660,7 +1700,7 @@ onGameEnd = function(data)
     end
 
     if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
-    postRoundCleanupUntil = os.clock() + 10.0
+    postRoundCleanupUntil = os.clock() + 30.0
     lastPostRoundCleanupSweepAt = 0
 
     local msg = "Game Over!"
@@ -1812,6 +1852,88 @@ preSpawnIfNeeded = function()
     }, assignedPropName)
 end
 
+local function getLocalPlayerId()
+    if not (MPVehicleGE and MPVehicleGE.getServerVehicleID) then return nil end
+    local myVehId = be and be.getPlayerVehicleID and be:getPlayerVehicleID(0) or nil
+    local myServerVeh = myVehId and MPVehicleGE.getServerVehicleID(myVehId) or nil
+    if not myServerVeh then return nil end
+    return tonumber(string.match(tostring(myServerVeh), "(%d+)%-%d+"))
+end
+
+local function restoreLocalHiderAfterTag(reason)
+    disguisedThisRound = false
+    disguisedRoundId = nil
+    isHidden = false
+    propID = nil
+
+    local restored = false
+
+    if originalVehId and be:getObjectByID(originalVehId) then
+        local origVeh = be:getObjectByID(originalVehId)
+        local curVeh = be:getPlayerVehicle(0)
+        local curPos = curVeh and curVeh.getPosition and curVeh:getPosition() or nil
+        local curRot = curVeh and curVeh.getRotation and curVeh:getRotation() or nil
+
+        pcall(function() origVeh:setActive(1) end)
+        if curPos and curRot and origVeh.setPositionRotation then
+            local ox, oy = 3.0, 0.0
+            if curVeh and curVeh.getDirectionVector then
+                local okDir, dir = pcall(function() return curVeh:getDirectionVector() end)
+                if okDir and dir then
+                    ox = -((dir.y or 0) * 3.0)
+                    oy =  ((dir.x or 0) * 3.0)
+                end
+            end
+            pcall(function()
+                origVeh:setPositionRotation(curPos.x + ox, curPos.y + oy, curPos.z, curRot.x, curRot.y, curRot.z, curRot.w)
+            end)
+        end
+        pcall(function() origVeh:queueLuaCommand('obj:setGhostEnabled(false)') end)
+        pcall(function() origVeh:queueLuaCommand('electrics.setIgnitionLevel(3)') end)
+        pcall(function()
+            if core_vehicleBridge and core_vehicleBridge.executeAction then
+                core_vehicleBridge.executeAction(origVeh, 'setFreeze', false)
+            end
+        end)
+        pcall(function() be:enterVehicle(0, origVeh) end)
+        restored = true
+    elseif preDisguiseModelKey and core_vehicles and core_vehicles.replaceVehicle then
+        local okRep, errRep = pcall(function()
+            if preDisguiseConfig and preDisguiseConfig ~= '' then
+                core_vehicles.replaceVehicle(preDisguiseModelKey, { config = preDisguiseConfig })
+            else
+                core_vehicles.replaceVehicle(preDisguiseModelKey, {})
+            end
+        end)
+        restored = okRep == true
+        if not okRep then
+            print("WARN: tag restore replace failed: " .. tostring(errRep))
+        end
+    else
+        print("WARN: No original vehicle captured; cannot revert after tag")
+    end
+
+    if propVehId then
+        local pv = be:getObjectByID(propVehId)
+        if pv then
+            pcall(function() pv:setActive(0) end)
+            pcall(function()
+                if core_vehicleBridge and core_vehicleBridge.executeAction then
+                    core_vehicleBridge.executeAction(pv, 'setFreeze', true)
+                end
+            end)
+        end
+    end
+
+    if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
+    if currentRoundId then localEliminatedRestoreRound = currentRoundId end
+
+    if restored then
+        beamMessage({ msg = (reason == "converted" and "Tagged! Back to your car.") or "You were found! Back to your car.", ttl = 4, icon = 'directions_car' })
+    end
+    return restored
+end
+
 local function beginSeekerHidePhaseEnforcement()
     local playerVeh = be:getPlayerVehicle(0)
     if playerVeh then
@@ -1820,12 +1942,18 @@ local function beginSeekerHidePhaseEnforcement()
     end
 
     setSeekerVisualBlock(true)
+    setSeekerScreenCoverFallback(true)
+    setSeekerHideBlur(true)
+    showSeekerBlackoutTitle(true)
     applyHideCameraLock(true)
 
     if scheduler and scheduler.add then
         if hideVisualTask then hideVisualTask = nil end
         hideVisualTask = scheduler.add(function(dt)
             setSeekerVisualBlock(true)
+            setSeekerScreenCoverFallback(true)
+            setSeekerHideBlur(true)
+            showSeekerBlackoutTitle(false)
             if not hidePhase then
                 hideVisualTask = nil
                 return false
@@ -1921,31 +2049,6 @@ onHidePhaseEnd = function(data)
 
     -- Unfreeze seeker's vehicle when hide phase ends
     if playerTeam == "seeker" then
-        local function releaseSeekerForHunt()
-            local playerVeh = be:getPlayerVehicle(0)
-            if playerVeh then
-                core_vehicleBridge.executeAction(playerVeh, 'setFreeze', false)
-                print("DEBUG: Seeker vehicle unfrozen - hunt begins!")
-            end
-
-            setSeekerVisualBlock(false)
-            clearSeekerBlackoutFallback()
-            applyHideCameraLock(false)
-            if hideVisualTask then hideVisualTask = nil end
-            if hideCameraTask then hideCameraTask = nil end
-
-            -- Return camera to orbit when round starts (nice default)
-            pcall(function()
-                if commands and commands.setGameCamera then
-                    commands.setGameCamera('orbit')
-                elseif core_camera and core_camera.setByName then
-                    core_camera.setByName('orbit')
-                end
-            end)
-
-            beamMessage({ msg = "Hunt begins NOW!", ttl = 3, icon = 'visibility' })
-        end
-
         local syncDelay = tonumber(seekerSyncDelayAfterHide or 0) or 0
         if syncDelay > 0 and scheduler and scheduler.add then
             beamMessage({ msg = string.format("Synchronizing hiders... (%.1fs)", syncDelay), ttl = math.max(1.0, syncDelay), icon = 'sync' })
@@ -1957,13 +2060,13 @@ onHidePhaseEnd = function(data)
                     core_vehicleBridge.executeAction(pv, 'setFreeze', true)
                 end
                 if t >= syncDelay then
-                    releaseSeekerForHunt()
+                    releaseSeekerHidePhaseLock(true)
                     return false
                 end
                 return true
             end)
         else
-            releaseSeekerForHunt()
+            releaseSeekerHidePhaseLock(true)
         end
     else
         -- Hiders: now transform into prop
@@ -2008,7 +2111,14 @@ onRoundStart = function(data)
     local roundStr = tostring(data or ""):match("^%s*(%d+)%s*$")
     if roundStr then currentRoundId = tonumber(roundStr) end
 
+    -- Failsafe for missed/out-of-order HidePhaseEnd events: RoundStart is authoritative
+    -- that seekers should no longer be blacked out or frozen.
+    hidePhase = false
+    hideTimer = 0
     allowDisguise = true
+    if playerTeam == "seeker" then
+        releaseSeekerHidePhaseLock(false)
+    end
     print("DEBUG: Main round started")
 
     -- Late-load / missed hide-phase end: if we already have an assigned prop, apply now.
@@ -2033,91 +2143,30 @@ onPlayerEliminated = function(data)
         icon = 'close'
     })
 
-    -- Always clear any temp prop vehicles for this eliminated player on this client
-    clearTempPropsForOwnerPid(targetId)
-    pulseNicknameRenderer()
+    noRoleTagPidSet[targetId] = true
 
-    -- If it's us, revert back to our pre-disguise vehicle (best-effort)
-    if MPVehicleGE and MPVehicleGE.getServerVehicleID then
-        local myVehId = be:getPlayerVehicleID(0)
-        local myServerVeh = myVehId and MPVehicleGE.getServerVehicleID(myVehId)
-        if myServerVeh then
-            local myPid = tonumber(string.match(tostring(myServerVeh), "(%d+)%-%d+"))
-            if myPid and myPid == targetId then
-                -- If original vehicle is known, switch back into it.
-                if originalVehId and be:getObjectByID(originalVehId) then
-                    local origVeh = be:getObjectByID(originalVehId)
-                    local curVeh = be:getPlayerVehicle(0)
-                    local curPos = curVeh and curVeh.getPosition and curVeh:getPosition() or nil
-                    local curRot = curVeh and curVeh.getRotation and curVeh:getRotation() or nil
-
-                    pcall(function() origVeh:setActive(1) end)
-                    if curPos and curRot and origVeh.setPositionRotation then
-                        local ox, oy = 3.0, 0.0
-                        if curVeh and curVeh.getDirectionVector then
-                            local okDir, dir = pcall(function() return curVeh:getDirectionVector() end)
-                            if okDir and dir then
-                                -- place restored car ~2m to the side to avoid overlap with seeker vehicle
-                                ox = -((dir.y or 0) * 3.0)
-                                oy =  ((dir.x or 0) * 3.0)
-                            end
-                        end
-                        pcall(function()
-                            origVeh:setPositionRotation(curPos.x + ox, curPos.y + oy, curPos.z, curRot.x, curRot.y, curRot.z, curRot.w)
-                        end)
-                    end
-                    pcall(function() origVeh:queueLuaCommand('obj:setGhostEnabled(false)') end)
-                    pcall(function() origVeh:queueLuaCommand('electrics.setIgnitionLevel(3)') end)
-                    pcall(function()
-                        if core_vehicleBridge and core_vehicleBridge.executeAction then
-                            core_vehicleBridge.executeAction(origVeh, 'setFreeze', false)
-                        end
-                    end)
-                    be:enterVehicle(0, origVeh)
-
-                    -- Hide/deactivate prop vehicle after elimination (optional)
-                    if propVehId then
-                        local pv = be:getObjectByID(propVehId)
-                        if pv then
-                            pcall(function() pv:setActive(0) end)
-                            pcall(function()
-                                if core_vehicleBridge and core_vehicleBridge.executeAction then
-                                    core_vehicleBridge.executeAction(pv, 'setFreeze', true)
-                                end
-                            end)
-                        end
-                    end
-
-                    if cleanupTempSpawnSwapProps then
-                        cleanupTempSpawnSwapProps()
-                    end
-
-                    if currentRoundId then localEliminatedRestoreRound = currentRoundId end
-                    beamMessage({ msg = "You were found! Back to your car (eliminated).", ttl = 4, icon = 'directions_car' })
-
-                else
-                    -- Replace-mode fallback: rebuild original vehicle from captured model/config.
-                    if preDisguiseModelKey and core_vehicles and core_vehicles.replaceVehicle then
-                        local okRep, errRep = pcall(function()
-                            if preDisguiseConfig and preDisguiseConfig ~= '' then
-                                core_vehicles.replaceVehicle(preDisguiseModelKey, { config = preDisguiseConfig })
-                            else
-                                core_vehicles.replaceVehicle(preDisguiseModelKey, {})
-                            end
-                        end)
-                        if okRep then
-                            if currentRoundId then localEliminatedRestoreRound = currentRoundId end
-                            beamMessage({ msg = "You were found! Reverting to car.", ttl = 4, icon = 'directions_car' })
-                        else
-                            print("WARN: replace fallback revert failed: " .. tostring(errRep))
-                        end
-                    else
-                        print("WARN: No original vehicle captured; cannot revert")
-                    end
-                end
-            end
-        end
+    -- Classic mode: mark the local player as tagged out, but do not swap vehicles
+    -- mid-round. Restoring here races with BeamMP camera/vehicle state and can
+    -- leave the player in another prop. Round-end handles the car restore.
+    local isLocalTarget = (getLocalPlayerId() == targetId)
+    if isLocalTarget then
+        taggedOutLocalRound = currentRoundId
+        disguisedThisRound = false
+        disguisedRoundId = nil
+        isHidden = false
+        propID = nil
+        if currentRoundId then localEliminatedRestoreRound = nil end
+        beamMessage({ msg = "Tagged! Wait for the round to end.", ttl = 4, icon = 'block' })
     end
+
+    pulseNicknameRenderer()
+end
+
+onTaggedPlayer = function(data)
+    local pid = tonumber(tostring(data or ""):match("^%s*(%d+)"))
+    if not pid then return end
+    noRoleTagPidSet[pid] = true
+    pulseNicknameRenderer()
 end
 
 onRoundEnd = function(data)
@@ -2236,7 +2285,7 @@ onRoundEnd = function(data)
 
     if cleanupTempSpawnSwapProps then cleanupTempSpawnSwapProps() end
     pulseNicknameRenderer()
-    postRoundCleanupUntil = os.clock() + 10.0
+    postRoundCleanupUntil = os.clock() + 30.0
     lastPostRoundCleanupSweepAt = 0
 
     if currentRoundId then
@@ -2249,6 +2298,8 @@ onRoundEnd = function(data)
     propVehId = nil
     preDisguiseModelKey = nil
     preDisguiseConfig = nil
+    noRoleTagPidSet = {}
+    taggedOutLocalRound = nil
 end
 
 -- --- CHAT COMMANDS ---
@@ -2275,7 +2326,6 @@ onChatMessage = function(msg)
 
         setHiderFilterIntensity = function(v) hiderFilterIntensity = v end,
         getHiderFilterIntensity = function() return hiderFilterIntensity end,
-        manualDecoy = manualDecoy,
     })
 end
 
@@ -2286,6 +2336,7 @@ onSeekerList = function(data)
     if proximity and proximity.onSeekerList then
         proximity.onSeekerList(data)
     end
+    applyNametagPolicyNow()
 end
 
 -- =============================
@@ -2296,13 +2347,6 @@ getNearestHiderDistance = function()
         return proximity.getNearestHiderDistance()
     end
     return nil
-end
-
-getNearestHiderInfo = function()
-    if proximity and proximity.getNearestHiderInfo then
-        return proximity.getNearestHiderInfo()
-    end
-    return nil, {}
 end
 
 getNearestSeekerDistance = function()
@@ -2354,69 +2398,7 @@ onHiderList = function(data)
     if proximity and proximity.onHiderList then
         proximity.onHiderList(data)
     end
-end
-
-local function getVehicleForwardVector(veh)
-    if not veh then return nil end
-    if veh.getDirectionVector then
-        local ok, dir = pcall(function() return veh:getDirectionVector() end)
-        if ok and dir then return dir end
-    end
-    if veh.getRotation then
-        local ok, rot = pcall(function() return veh:getRotation() end)
-        if ok and rot then
-            local x = tonumber(rot.x) or 0
-            local y = tonumber(rot.y) or 0
-            local z = tonumber(rot.z) or 0
-            local w = tonumber(rot.w) or 1
-            return {
-                x = 2 * (x * z + w * y),
-                y = 2 * (y * z - w * x),
-                z = 1 - 2 * (x * x + y * y)
-            }
-        end
-    end
-    return nil
-end
-
-local function getScanDirectionLabel(targetInfo)
-    if not targetInfo or not targetInfo.pos then return nil end
-    local veh = be:getPlayerVehicle(0)
-    if not veh or not veh.getPosition then return nil end
-    local myPos = veh:getPosition()
-    if not myPos then return nil end
-
-    local forward = getVehicleForwardVector(veh)
-    if not forward then return nil end
-
-    local dx = (tonumber(targetInfo.pos.x) or 0) - (tonumber(myPos.x) or 0)
-    local dy = (tonumber(targetInfo.pos.y) or 0) - (tonumber(myPos.y) or 0)
-    local fx = tonumber(forward.x) or 0
-    local fy = tonumber(forward.y) or 0
-    local dLen = math.sqrt(dx * dx + dy * dy)
-    local fLen = math.sqrt(fx * fx + fy * fy)
-    if dLen < 0.001 or fLen < 0.001 then return nil end
-
-    dx, dy = dx / dLen, dy / dLen
-    fx, fy = fx / fLen, fy / fLen
-
-    local dot = fx * dx + fy * dy
-    local cross = fx * dy - fy * dx
-    local side = nil
-    if math.abs(cross) > 0.30 then
-        side = (cross > 0) and "left" or "right"
-    end
-
-    if dot > 0.75 then
-        return side and ("front-" .. side) or "ahead"
-    elseif dot < -0.75 then
-        return side and ("back-" .. side) or "behind"
-    elseif side then
-        return side
-    elseif dot >= 0 then
-        return "ahead"
-    end
-    return "behind"
+    applyNametagPolicyNow()
 end
 
 onScanPulse = function(data)
@@ -2427,39 +2409,16 @@ onScanPulse = function(data)
     local rid = tonumber(data)
     if rid then currentRoundId = rid end
 
-    local d, info = getNearestHiderInfo()
+    local d = getNearestHiderDistance()
     local s = strengthFromDistance(d)
-    local direction = getScanDirectionLabel(info)
 
     if d then
-        local msg = string.format("SCAN: signal %.0f%%", s * 100)
-        if direction and direction ~= "" then
-            msg = msg .. " " .. direction
-        end
-        beamMessage({ msg = msg, ttl = 1.5, icon = 'radar' })
+        beamMessage({ msg = string.format("SCAN: signal %.0f%%", s * 100), ttl = 1.5, icon = 'radar' })
     else
         beamMessage({ msg = "SCAN: no signal", ttl = 1.5, icon = 'radar' })
     end
 
     playScannerBeep(s)
-end
-
-onDecoyPlace = function(data)
-    local ridStr, propKey = tostring(data or ""):match("^%s*(%d+)%s*,%s*([^,]+)%s*$")
-    local rid = tonumber(ridStr)
-    if rid and currentRoundId and rid ~= currentRoundId then return end
-    if not propKey or propKey == "" then return end
-    disguiseMod.spawnDecoyProp({
-        beamMessage = beamMessage,
-        getPlayerTeam = function() return playerTeam end,
-        getCurrentRoundId = function() return currentRoundId end
-    }, propKey)
-end
-
-onDecoyDenied = function(data)
-    local reason = tostring(data or "")
-    if reason == "" then reason = "Decoy unavailable" end
-    beamMessage({ msg = "DECOY: " .. reason, ttl = 2.5, icon = 'info' })
 end
 
 onSettings = function(data)
@@ -2568,6 +2527,14 @@ onHudPulse = function(data)
     local preset = tostring(parts[8] or "custom")
 
     if rid then currentRoundId = rid end
+    if phase == "round" and hidePhase then
+        print("[PH] HUD phase pulse corrected stale hidePhase for round " .. tostring(currentRoundId))
+        hidePhase = false
+        hideTimer = 0
+        if playerTeam == "seeker" then
+            releaseSeekerHidePhaseLock(false)
+        end
+    end
 
     local objective = (playerTeam == "seeker") and "Find and tag hiders" or "Survive and waste time"
     local msg = string.format("%s | H:%d/%d S:%d | %s | preset=%s", string.upper(phase), alive, hiders, seekers, objective, preset)
@@ -2743,6 +2710,10 @@ onTeamUpdate = function(data)
     if team and team ~= "" then
         playerTeam = team
         if team == "seeker" then
+            local localPid = getLocalPlayerId()
+            restoreLocalHiderAfterTag("converted")
+            if currentRoundId then localEliminatedRestoreRound = currentRoundId end
+            clearTempPropsForOwnerPid(localPid or resolveOwnerPlayerIdFromVehId(be:getPlayerVehicleID(0)) or -1)
             applyNametagPolicyNow()
             local sv = be:getPlayerVehicle(0)
             seekerLockedVehId = sv and sv:getID() or seekerLockedVehId
@@ -2750,7 +2721,12 @@ onTeamUpdate = function(data)
         else
             -- Failsafe: if role switched away from seeker, force-clear seeker blackout effects.
             setSeekerVisualBlock(false)
+            setSeekerHideBlur(false)
             clearSeekerBlackoutFallback()
+            if guihooks and guihooks.trigger then
+                pcall(function() guihooks.trigger('ScenarioFlashMessageClear') end)
+                pcall(function() guihooks.trigger('ScenarioRealtimeDisplay', {msg = ""}) end)
+            end
             applyNametagPolicyNow()
             beamMessage({ msg = "Team updated: " .. tostring(team), ttl = 3, icon = 'info' })
         end
@@ -2846,38 +2822,26 @@ local function manualScan()
     end
 end
 
-manualDecoy = function()
-    if playerTeam ~= "hider" then
-        beamMessage({ msg = "Decoy is hiders-only", ttl = 2, icon = 'info' })
-        return
-    end
-    if not gameActive or hidePhase then
-        beamMessage({ msg = "Can't place decoy yet", ttl = 2, icon = 'timer' })
-        return
-    end
-    if not assignedPropName or assignedPropName == "" then
-        beamMessage({ msg = "No prop assigned yet", ttl = 2, icon = 'error' })
-        return
-    end
-    if TriggerServerEvent then
-        TriggerServerEvent("PropHunt_DecoyRequest", "")
-        beamMessage({ msg = "DECOY: request sent...", ttl = 1.0, icon = 'category' })
-    end
-end
-
 -- --- EXPORTS ---
 M.onExtensionLoaded = onExtensionLoaded
 M.onUpdate = onUpdate
 M.onVehicleSwitched = function(oldId, newId)
     -- Keep hooks attached if player changes/reloads vehicle mid-session.
     ensureVehicleExtensionsLoaded(gameActive)
+    if gameActive and not hidePhase and playerTeam == "hider" and propVehId and tonumber(newId) ~= tonumber(propVehId)
+        and (disguisedThisRound == true or (taggedOutLocalRound and currentRoundId and taggedOutLocalRound == currentRoundId)) then
+        local pv = be:getObjectByID(propVehId)
+        if pv then
+            pcall(function() be:enterVehicle(0, pv) end)
+            beamMessage({ msg = "Stay as your prop until round end", ttl = 2, icon = 'block' })
+        end
+    end
     forceLocalVehicleVisible()
     requestStateBurst()
 end
 M.onPreRender = function(dt)
     if hidePhase and playerTeam == "seeker" then
-        -- Last-frame hard override so nothing else can clear the blackout.
-        forceSeekerBlackoutNow()
+        showSeekerBlackoutTitle(false)
     end
 
     if gameActive then
@@ -2897,7 +2861,7 @@ M.setProp = setProp
 M.performSwap = performSwap
 M.manualTaunt = manualTaunt
 M.manualScan = manualScan
-M.manualDecoy = manualDecoy
+M.requestStateBurst = requestStateBurst
 M.playSound = playSound
 M.getPropID = function() return propID end
 
@@ -2911,45 +2875,6 @@ resolveOwnerPlayerIdFromVehId = function(vehId)
     end
     return nil
 end
-
-local lastAutoTagTime = 0
-local AUTO_TAG_COOLDOWN = 0.5
-
-local function onSeekerCollision(otherVehId)
-    if not gameActive or hidePhase then return end
-    if playerTeam ~= "seeker" then return end
-
-    local t = os.clock()
-    if (t - lastAutoTagTime) < AUTO_TAG_COOLDOWN then return end
-    lastAutoTagTime = t
-
-    local otherId = tonumber(otherVehId)
-    if not otherId then return end
-
-    -- Prefer the more accurate OBB overlap gate (game-style hitbox) if available
-    local myVeh = be:getPlayerVehicle(0)
-    local myId = myVeh and myVeh:getID() or nil
-
-    if M.sendTagContact and myId then
-        M.sendTagContact(otherId, myId)
-        return
-    end
-
-    -- Fallback: old behavior (owner resolution only)
-    local targetPlayerId = resolveOwnerPlayerIdFromVehId(otherId)
-    if not targetPlayerId then
-        print("DEBUG: Could not resolve owner for collided vehicle " .. tostring(otherId) .. " (BeamMP API mismatch)")
-        return
-    end
-
-    if TriggerServerEvent then
-        local rid = tonumber(currentRoundId or 0) or 0
-        local token = makeTagToken(targetPlayerId)
-        TriggerServerEvent("PropHunt_onContactReceive", tostring(rid) .. "|" .. tostring(targetPlayerId) .. "|" .. token)
-        print("DEBUG: Auto-tag collision => contact on player " .. tostring(targetPlayerId))
-    end
-end
-
 
 onAssignProp = function(data)
     -- data: "roundId,propKey" (new) or just propKey
@@ -2981,118 +2906,17 @@ onAssignProp = function(data)
 end
 
 -- Export a callable so we can trigger from UI/keybind later if desired
-M.onSeekerCollision = onSeekerCollision
-
-
--- =============================
--- SEEKER TAGGING (Outbreak-style collision contact)
--- =============================
-local lastTagContact = 0
-local TAG_CONTACT_COOLDOWN = 0.25
-
--- Debug + hard-enable OBB gating for tag validation
-local TAG_OBB_ENABLED = true
-local TAG_OBB_DEBUG = true   -- set false once confirmed
-local lastObbDebugAt = 0
-
-local function makeTagToken(remotePid)
-    return tostring(math.floor((os.clock() or 0) * 1000)) .. "-" .. tostring(remotePid or 0) .. "-" .. tostring(math.random(100000, 999999))
-end
-
-local function sendTagContact(remoteVehID, localVehID)
-    if not gameActive or hidePhase then return end
-    if playerTeam ~= "seeker" then return end
-
-    local t = os.clock()
-    if (t - lastTagContact) < TAG_CONTACT_COOLDOWN then return end
-    lastTagContact = t
-
-    -- In some BeamMP builds, isOwn(gameVehId) can be unreliable when multiple seekers are present.
-    -- Do NOT hard-block here; the server will still validate the sender is a seeker.
-    -- (We keep the check only for optional debug.)
-    -- if MPVehicleGE and MPVehicleGE.isOwn and not MPVehicleGE.isOwn(localVehID) then return end
-
-    -- Extra validation: use true vehicle world OBB overlap (game code approach)
-    if TAG_OBB_ENABLED then
-        local function getOOBB(vehId)
-            if not vehId then return nil, "no vehId" end
-            if not be or not be.getObjectByID then return nil, "no be:getObjectByID" end
-            local veh = be:getObjectByID(vehId)
-            if not veh then return nil, "no veh object" end
-            if not veh.getSpawnWorldOOBB then return nil, "no getSpawnWorldOOBB method" end
-            local ok, bb = pcall(function() return veh:getSpawnWorldOOBB() end)
-            if not ok or not bb then return nil, "getSpawnWorldOOBB failed" end
-            return bb, nil
-        end
-
-        local bb1, e1 = getOOBB(localVehID)
-        local bb2, e2 = getOOBB(remoteVehID)
-        local haveFn = (type(overlapsOBB_OBB) == 'function')
-
-        local dbgNow = os.clock()
-        if TAG_OBB_DEBUG and (dbgNow - lastObbDebugAt) > 0.5 then
-            lastObbDebugAt = dbgNow
-            print(string.format("PropHunt[TAG-OBB] local=%s remote=%s bb1=%s bb2=%s overlapsFn=%s e1=%s e2=%s",
-                tostring(localVehID), tostring(remoteVehID), tostring(bb1 ~= nil), tostring(bb2 ~= nil), tostring(haveFn), tostring(e1), tostring(e2)))
-        end
-
-        if bb1 and bb2 and haveFn then
-            local ok, hit = pcall(function()
-                local he1 = bb1:getHalfExtents()
-                local he2 = bb2:getHalfExtents()
-
-                -- Make tagging small props less "pixel perfect" by slightly inflating the target OBB.
-                -- This compensates for contact callback noise / very small prop colliders.
-                local inflate = 1.45
-                local minHalf = 0.55 -- meters-ish; keeps tiny props hittable
-
-                local hx2 = math.max(he2.x * inflate, minHalf)
-                local hy2 = math.max(he2.y * inflate, minHalf)
-                local hz2 = math.max(he2.z * inflate, minHalf)
-
-                return overlapsOBB_OBB(
-                    bb1:getCenter(), bb1:getAxis(0) * he1.x, bb1:getAxis(1) * he1.y, bb1:getAxis(2) * he1.z,
-                    bb2:getCenter(), bb2:getAxis(0) * hx2,  bb2:getAxis(1) * hy2,  bb2:getAxis(2) * hz2
-                )
-            end)
-
-            if TAG_OBB_DEBUG and (dbgNow - lastObbDebugAt) > 0.0 then
-                -- (rate-limited by block above)
-            end
-
-            -- Hard gate: if OBB says no overlap, do not tag.
-            if ok and not hit then
-                if TAG_OBB_DEBUG and (dbgNow - lastObbDebugAt) > 0.49 then
-                    print("PropHunt[TAG-OBB] result=false (blocked tag)")
-                end
-                return
-            end
-
-            if not ok then
-                print("PropHunt[TAG-OBB] ERROR running overlapsOBB_OBB; falling back: " .. tostring(hit))
-            end
-        else
-            -- If we can't run OBB overlap in this environment, we fall back (so the mode stays playable).
-        end
-    end
-
-    -- Map remote vehicle -> remote playerId using server vehicle string "pid-vid"
-    if MPVehicleGE and MPVehicleGE.getServerVehicleID then
-        local serverVehID = MPVehicleGE.getServerVehicleID(remoteVehID)
-        if serverVehID then
-            local remotePid = tonumber(string.match(tostring(serverVehID), "(%d+)%-%d+"))
-            if remotePid and TriggerServerEvent then
-                -- Outbreak-style contact event
-                local rid = tonumber(currentRoundId or 0) or 0
-                local token = makeTagToken(remotePid)
-                TriggerServerEvent("PropHunt_onContactReceive", tostring(rid) .. "|" .. tostring(remotePid) .. "|" .. token)
-                return
-            end
-        end
+M.onSeekerCollision = function(otherVehId)
+    if tagging and tagging.onSeekerCollision then
+        tagging.onSeekerCollision(otherVehId)
     end
 end
 
-M.sendTagContact = sendTagContact
+M.sendTagContact = function(remoteVehID, localVehID)
+    if tagging and tagging.sendTagContact then
+        tagging.sendTagContact(remoteVehID, localVehID)
+    end
+end
 
 -- Debug helper: play end-of-round sound right now
 M.debugPlayEndSound = function()

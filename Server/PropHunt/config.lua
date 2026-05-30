@@ -29,9 +29,9 @@ M.defaults = {
   hideNametagsInRound = true,
 
   -- visuals
-  seekerFadeDist = 120,
+  seekerFadeDist = 25,
   seekerFilterIntensity = 1.0,
-  hiderFadeDist = 120,
+  hiderFadeDist = 25,
   hiderFilterIntensity = 0.35,
 
   -- join behavior while round is active: lock_next_round | spectator | seeker | hider

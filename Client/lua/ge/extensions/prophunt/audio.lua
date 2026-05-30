@@ -30,7 +30,7 @@ function M.new(opts)
 
   function self.getRandomTauntSound()
     if #self.availableTauntFiles == 0 then
-      return string.format("%s/taunt%02d.ogg", self.tauntDir, math.random(1, 24))
+      return string.format("%s/taunt%d.ogg", self.tauntDir, math.random(1, 24))
     end
     return self.availableTauntFiles[math.random(#self.availableTauntFiles)]
   end

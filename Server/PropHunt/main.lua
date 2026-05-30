@@ -42,7 +42,7 @@ do
             tempPropSweepSeconds = 15,
             forceGhostOffOnRestore = true,
             spawnswapRetryCount = 2,
-            seekerTabPrevention = true,
+            seekerTabPrevention = false,
             allowNodeGrabInRound = false,
             allowHiderResetInRound = false,
             hideNametagsInRound = true,
@@ -53,9 +53,6 @@ do
             joinPolicy = "lock_next_round",
             disguiseMode = "replace",
             nextRoundForcedProp = nil,
-            propBlacklist = {},
-            propWhitelist = {},
-            decoysPerRound = 1,
             adminAclEnabled = false,
             adminIds = {},
             adminNames = {},
@@ -84,7 +81,7 @@ if config.forceGhostOffOnRestore == nil then config.forceGhostOffOnRestore = tru
 if config.cleanupSweepSeconds == nil then config.cleanupSweepSeconds = tonumber(config.tempPropSweepSeconds or 15) or 15 end
 if config.spawnswapRetryCount == nil then config.spawnswapRetryCount = 2 end
 if config.allowSoloTest == nil then config.allowSoloTest = false end
-if config.seekerTabPrevention == nil then config.seekerTabPrevention = true end
+if config.seekerTabPrevention == nil then config.seekerTabPrevention = false end
 if config.allowNodeGrabInRound == nil then config.allowNodeGrabInRound = false end
 if config.allowHiderResetInRound == nil then config.allowHiderResetInRound = false end
 if config.hideNametagsInRound == nil then config.hideNametagsInRound = true end
@@ -103,9 +100,6 @@ if config.mapProfiles == nil then config.mapProfiles = {} end
 if config.spawnBanks == nil then config.spawnBanks = {} end
 if config.propTierMode == nil then config.propTierMode = "all" end
 if config.perksEnabled == nil then config.perksEnabled = true end
-if config.propBlacklist == nil then config.propBlacklist = {} end
-if config.propWhitelist == nil then config.propWhitelist = {} end
-if config.decoysPerRound == nil then config.decoysPerRound = 1 end
 if config.autorunEnabled == nil then config.autorunEnabled = false end
 if config.autorunIntervalSeconds == nil then config.autorunIntervalSeconds = 600 end
 if config.autorunMinPlayers == nil then config.autorunMinPlayers = 2 end
@@ -119,39 +113,7 @@ end
 
 local function isValidProp(key)
     for _, v in ipairs(config.propPool) do
-        if tostring(v):lower() == tostring(key or ""):lower() then
-            return true
-        end
-    end
-    return false
-end
-
-local function normalizePropKey(key)
-    return tostring(key or ""):lower()
-end
-
-local function listHasProp(list, key)
-    local needle = normalizePropKey(key)
-    for _, v in ipairs(list or {}) do
-        if normalizePropKey(v) == needle then
-            return true
-        end
-    end
-    return false
-end
-
-local function addUniqueProp(list, key)
-    local normalized = normalizePropKey(key)
-    if normalized == "" or listHasProp(list, normalized) then return false end
-    list[#list + 1] = normalized
-    return true
-end
-
-local function removePropFromList(list, key)
-    local needle = normalizePropKey(key)
-    for i = #list, 1, -1 do
-        if normalizePropKey(list[i]) == needle then
-            table.remove(list, i)
+        if tostring(v) == tostring(key) then
             return true
         end
     end
@@ -196,12 +158,6 @@ end
 
 local gameState
 local pushHudPulse
-local propAllowedByLiveFilters
-local propAllowedForRound
-local buildEligiblePropPool
-local getAnyFallbackProp
-local pickRandomEligibleProp
-local describePropFilterState
 
 local PRESET_DEFS = {
     casual = { seekerMode = "fixed", seekerCount = 1, hideTime = 60, roundTime = 300, scanCooldown = 0.15, tauntCooldown = 5, propTierMode = "all" },
@@ -363,11 +319,9 @@ gameState = {
     lastTauntEvent = {},
     lastTagEvent = {},
     lastScanEvent = {},
-    lastDecoyEvent = {},
     lastTempPropEvent = {},
     recentContactClaims = {}, -- seekerId -> targetId -> { t=now(), roundId=n, token=string|nil }
     tempProps = {}, -- playerID -> { [serverVehicleString]=true } for temporary spawned props
-    decoysUsed = {}, -- playerID -> count used this round
     lastTempPropSweepAt = 0,
 
     roundStartedAt = 0,
@@ -432,47 +386,78 @@ local function countAliveHiders()
     return n
 end
 
-local function sendHiderListToSeekers()
-    if not gameState.active then return end
+local function countAliveSeekers()
+    local n = 0
+    for _, p in pairs(gameState.players) do
+        if p.team == "seeker" and p.alive then n = n + 1 end
+    end
+    return n
+end
 
+local function countTeamMembers(teamName)
+    local n = 0
+    for _, p in pairs(gameState.players or {}) do
+        if p.team == teamName then n = n + 1 end
+    end
+    return n
+end
+
+local function pickRandomAliveHider()
+    local candidates = {}
+    for pid, p in pairs(gameState.players or {}) do
+        if p.team == "hider" and p.alive then
+            candidates[#candidates + 1] = pid
+        end
+    end
+    if #candidates <= 0 then return nil end
+    return candidates[math.random(#candidates)]
+end
+
+local function buildHiderListPayload()
     local ids = {}
     for pid, pdata in pairs(gameState.players) do
         if pdata.team == "hider" and pdata.alive then
             table.insert(ids, tostring(pid))
         end
     end
+    table.sort(ids, function(a, b) return (tonumber(a) or 0) < (tonumber(b) or 0) end)
 
     local payload = tostring(gameState.roundId)
     if #ids > 0 then
         payload = payload .. "," .. table.concat(ids, ",")
     end
-
-    for pid, pdata in pairs(gameState.players) do
-        if pdata.team == "seeker" then
-            MP.TriggerClientEvent(pid, "PropHunt_HiderList", payload)
-        end
-    end
+    return payload
 end
 
-local function sendSeekerListToHiders()
-    if not gameState.active then return end
-
+local function buildSeekerListPayload()
     local ids = {}
     for pid, pdata in pairs(gameState.players) do
         if pdata.team == "seeker" and pdata.alive then
             table.insert(ids, tostring(pid))
         end
     end
+    table.sort(ids, function(a, b) return (tonumber(a) or 0) < (tonumber(b) or 0) end)
 
     local payload = tostring(gameState.roundId)
     if #ids > 0 then
         payload = payload .. "," .. table.concat(ids, ",")
     end
+    return payload
+end
 
-    for pid, pdata in pairs(gameState.players) do
-        if pdata.team == "hider" then
-            MP.TriggerClientEvent(pid, "PropHunt_SeekerList", payload)
-        end
+local function sendTeamListsToPlayer(playerId)
+    if not gameState.active then return end
+    MP.TriggerClientEvent(playerId, "PropHunt_HiderList", buildHiderListPayload())
+    MP.TriggerClientEvent(playerId, "PropHunt_SeekerList", buildSeekerListPayload())
+end
+
+local function sendTeamListsToAll()
+    if not gameState.active then return end
+    local hiderPayload = buildHiderListPayload()
+    local seekerPayload = buildSeekerListPayload()
+    for pid, _ in pairs(gameState.players) do
+        MP.TriggerClientEvent(pid, "PropHunt_HiderList", hiderPayload)
+        MP.TriggerClientEvent(pid, "PropHunt_SeekerList", seekerPayload)
     end
 end
 
@@ -496,7 +481,7 @@ local function formatSettingsPayload()
         .. "," .. tostring(config.forceGhostOffOnRestore ~= false)
         .. "," .. tostring(math.max(1, tonumber(config.spawnswapRetryCount or 1) or 1))
         .. "," .. tostring(math.max(1, tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15))
-        .. "," .. tostring(config.seekerTabPrevention ~= false)
+        .. "," .. tostring(false)
         .. "," .. tostring(config.hideNametagsInRound ~= false)
         .. "," .. tostring(config.allowNodeGrabInRound == true)
         .. "," .. tostring(config.allowHiderResetInRound == true)
@@ -560,6 +545,7 @@ local function clearTempPropsForPlayer(pid, reason)
                 manual = true,
                 disconnect = true,
                 stale = true,
+                tagged = true,
                 timeout = true,
                 hiders = true,
                 seekers = true,
@@ -657,9 +643,7 @@ local function PropHunt_StopGameInternal(reason)
     gameState.lastFlash = {}
     gameState.lastTag = {}
     gameState.lastScan = {}
-    gameState.lastDecoyEvent = {}
     gameState.tempProps = {}
-    gameState.decoysUsed = {}
     gameState.lastTempPropSweepAt = 0
     gameState.roundStartedAt = 0
 
@@ -750,9 +734,7 @@ function PropHunt_StartGame(optionalRoundSeconds)
     gameState.lastFlash = {}
     gameState.lastTag = {}
     gameState.lastScan = {}
-    gameState.lastDecoyEvent = {}
     gameState.tempProps = {}
-    gameState.decoysUsed = {}
     gameState.lastTempPropSweepAt = now()
     gameState.roundStartedAt = now()
     gameState.roundTags = 0
@@ -788,22 +770,18 @@ function PropHunt_StartGame(optionalRoundSeconds)
 
     -- E) Assign each hider a prop (server authoritative, client spawns)
     local forcedProp = config.nextRoundForcedProp
-    if forcedProp and not propAllowedForRound(forcedProp) then
-        broadcast("Forced prop '" .. tostring(forcedProp) .. "' is filtered out; using eligible random props instead.")
-        forcedProp = nil
-    end
 
-    local filteredPool = buildEligiblePropPool()
+    local filteredPool = {}
+    for _, p in ipairs(config.propPool or {}) do
+        if propAllowedByTier(p) then filteredPool[#filteredPool + 1] = p end
+    end
     if #filteredPool == 0 then filteredPool = config.propPool or {"barrels"} end
     local propCandidates = shuffleProps(filteredPool)
     local propIndex = 0
     local function getNextProp()
         propIndex = propIndex + 1
         if propIndex > #propCandidates then
-            propCandidates = shuffleProps(buildEligiblePropPool())
-            if #propCandidates == 0 then
-                propCandidates = { getAnyFallbackProp() }
-            end
+            propCandidates = shuffleProps(config.propPool)
             propIndex = 1
         end
         return propCandidates[propIndex]
@@ -823,8 +801,7 @@ function PropHunt_StartGame(optionalRoundSeconds)
     broadcastSettings()
 
     -- Send team lists for proximity + scan strength estimation
-    sendHiderListToSeekers()
-    sendSeekerListToHiders()
+    sendTeamListsToAll()
 
     -- Announce seekers
     for playerId, pdata in pairs(gameState.players) do
@@ -987,80 +964,6 @@ local function findPlayerIdByNameExact(name)
     return nil
 end
 
-propAllowedByLiveFilters = function(propName)
-    local pn = normalizePropKey(propName)
-    if listHasProp(config.propBlacklist, pn) then
-        return false
-    end
-    if #(config.propWhitelist or {}) > 0 then
-        return listHasProp(config.propWhitelist, pn)
-    end
-    return true
-end
-
-propAllowedForRound = function(propName)
-    return propAllowedByTier(propName) and propAllowedByLiveFilters(propName)
-end
-
-buildEligiblePropPool = function()
-    local filteredPool = {}
-    for _, p in ipairs(config.propPool or {}) do
-        if propAllowedForRound(p) then
-            filteredPool[#filteredPool + 1] = p
-        end
-    end
-    return filteredPool
-end
-
-getAnyFallbackProp = function()
-    if type(config.propPool) == "table" and #config.propPool > 0 then
-        return config.propPool[math.random(#config.propPool)]
-    end
-    return "barrels"
-end
-
-pickRandomEligibleProp = function()
-    local pool = buildEligiblePropPool()
-    if #pool <= 0 then
-        return getAnyFallbackProp()
-    end
-    return pool[math.random(#pool)]
-end
-
-describePropFilterState = function()
-    local allowedCount = #buildEligiblePropPool()
-    return string.format(
-        "allowed=%d/%d blacklist=%d whitelist=%d",
-        allowedCount,
-        #(config.propPool or {}),
-        #(config.propBlacklist or {}),
-        #(config.propWhitelist or {})
-    )
-end
-
-local function describeNextSeekerOverride()
-    if type(gameState.nextSeekers) == "table" then
-        local ids = {}
-        for pid, enabled in pairs(gameState.nextSeekers) do
-            if enabled then
-                ids[#ids + 1] = tonumber(pid) or pid
-            end
-        end
-        table.sort(ids, function(a, b) return tostring(a) < tostring(b) end)
-        if #ids > 0 then
-            local out = {}
-            for _, pid in ipairs(ids) do out[#out + 1] = tostring(pid) end
-            return table.concat(out, ",")
-        end
-    end
-
-    if gameState.nextSeeker ~= nil then
-        return tostring(gameState.nextSeeker)
-    end
-
-    return "auto"
-end
-
 local function showStatus(playerId)
     local active = tostring(gameState.active)
     local phase = tostring(gameState.phase)
@@ -1070,14 +973,10 @@ local function showStatus(playerId)
     send(playerId, string.format("Timers: hide=%ds round=%ds", tonumber(gameState.hideTimer or 0), tonumber(gameState.roundTimer or 0)))
     send(playerId, string.format("Config: mode=%s seekerMode=%s seekerCount=%s seekerRatio=%s", tostring(config.mode), tostring(config.seekerMode), tostring(config.seekerCount), tostring(config.seekerRatio)))
     send(playerId, string.format("Config: hideTime=%ds roundTime=%ds joinPolicy=%s disguiseMode=%s forcedProp=%s", tonumber(config.hideTime or 60), tonumber(config.roundTime or 300), tostring(config.joinPolicy or "lock_next_round"), tostring(config.disguiseMode or "replace"), tostring(config.nextRoundForcedProp or "random")))
-    send(playerId, string.format("Next round: seekerOverride=%s", describeNextSeekerOverride()))
-    send(playerId, string.format("Props: %s decoysPerRound=%s", describePropFilterState(), tostring(tonumber(config.decoysPerRound or 1) or 1)))
-    if tostring(config.disguiseMode or ""):lower() == "spawnswap" then
-        send(playerId, "Note: disguisemode=spawnswap is deprecated/disabled.")
-    end
+    send(playerId, "Note: disguisemode=spawnswap is deprecated/disabled.")
     send(playerId, string.format("Profiles: preset=%s map=%s propTierMode=%s perks=%s", tostring(config.currentPreset or "custom"), tostring(gameState.currentMapKey or "unknown"), tostring(config.propTierMode or "all"), tostring(config.perksEnabled == true)))
     send(playerId, string.format("Visuals: seekerFade=%.1f seekerIntensity=%.2f hiderFade=%.1f hiderIntensity=%.2f", tonumber(config.seekerFadeDist or 120), tonumber(config.seekerFilterIntensity or 1), tonumber(config.hiderFadeDist or 120), tonumber(config.hiderFilterIntensity or 0.35)))
-    send(playerId, string.format("Stability: forceGhostOffOnRestore=%s cleanupSweepSeconds=%s spawnswapRetryCount=%s seekerTabPrevention=%s hideNametagsInRound=%s nodeGrab=%s hiderReset=%s", tostring(config.forceGhostOffOnRestore ~= false), tostring(tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15), tostring(tonumber(config.spawnswapRetryCount or 1) or 1), tostring(config.seekerTabPrevention ~= false), tostring(config.hideNametagsInRound ~= false), tostring(config.allowNodeGrabInRound == true), tostring(config.allowHiderResetInRound == true)))
+    send(playerId, string.format("Stability: forceGhostOffOnRestore=%s cleanupSweepSeconds=%s spawnswapRetryCount=%s seekerTabPrevention=%s hideNametagsInRound=%s nodeGrab=%s hiderReset=%s", tostring(config.forceGhostOffOnRestore ~= false), tostring(tonumber(config.cleanupSweepSeconds or config.tempPropSweepSeconds or 15) or 15), tostring(tonumber(config.spawnswapRetryCount or 1) or 1), tostring(false), tostring(config.hideNametagsInRound ~= false), tostring(config.allowNodeGrabInRound == true), tostring(config.allowHiderResetInRound == true)))
     send(playerId, string.format("Autorun: enabled=%s interval=%ss trigger_if_players>%s", tostring(config.autorunEnabled == true), tostring(math.floor(tonumber(config.autorunIntervalSeconds or 600) or 600)), tostring(math.floor(tonumber(config.autorunMinPlayers or 2) or 2))))
     send(playerId, string.format("AutoTaunt: enabled=%s interval=%ss", tostring(config.autoTauntEnabled == true), tostring(math.floor(tonumber(config.autoTauntIntervalSeconds or 30) or 30))))
 end
@@ -1088,7 +987,7 @@ local function showHelp(playerId)
     send(playerId, "  /ph stop - Stop game")
     send(playerId, "  /ph status - Round + config status")
     send(playerId, "  /ph points [playerID] - economy/perk status")
-    send(playerId, "  /ph players - List player IDs + PropHunt state")
+    send(playerId, "  /ph players - List player IDs")
     send(playerId, "  /ph seeker <playerID> - Set next seeker (next round)")
     send(playerId, "  /ph seekers <id1> <id2> ... - Set seekers for next round (multiple)")
     send(playerId, "  /ph seekername <username> - Set next seeker by exact username")
@@ -1117,63 +1016,7 @@ local function showHelp(playerId)
     send(playerId, "  /ph spawnbank list <mapKey> | /ph spawnbank clear <mapKey>")
     send(playerId, "  /ph props random - Random prop per hider")
     send(playerId, "  /ph props <propKey> - Force a prop for NEXT round only")
-    send(playerId, "  /ph props blacklist|whitelist add|remove|list|clear <propKey>")
     send(playerId, "(Old style also works: /phstart, /phstop, etc)")
-end
-
-local function handlePropFilterCommand(playerId, mode, action, propKey)
-    local list = (mode == "blacklist") and config.propBlacklist or config.propWhitelist
-    if action == "list" then
-        if #list == 0 then
-            send(playerId, string.format("Prop %s: (empty)", mode))
-        else
-            send(playerId, string.format("Prop %s: %s", mode, table.concat(list, ", ")))
-        end
-        send(playerId, "Eligible pool: " .. describePropFilterState())
-        return 1
-    end
-
-    if action == "clear" then
-        if mode == "blacklist" then
-            config.propBlacklist = {}
-        else
-            config.propWhitelist = {}
-        end
-        send(playerId, string.format("Prop %s cleared", mode))
-        send(playerId, "Eligible pool: " .. describePropFilterState())
-        return 1
-    end
-
-    local normalized = normalizePropKey(propKey)
-    if normalized == "" then
-        send(playerId, string.format("Usage: /ph props %s %s <propKey>", mode, action))
-        return 1
-    end
-    if not isValidProp(normalized) then
-        send(playerId, "Unknown prop key: " .. tostring(propKey))
-        return 1
-    end
-
-    if action == "add" then
-        if addUniqueProp(list, normalized) then
-            send(playerId, string.format("Added %s to %s", normalized, mode))
-        else
-            send(playerId, string.format("%s already in %s", normalized, mode))
-        end
-        send(playerId, "Eligible pool: " .. describePropFilterState())
-        return 1
-    elseif action == "remove" then
-        if removePropFromList(list, normalized) then
-            send(playerId, string.format("Removed %s from %s", normalized, mode))
-        else
-            send(playerId, string.format("%s was not in %s", normalized, mode))
-        end
-        send(playerId, "Eligible pool: " .. describePropFilterState())
-        return 1
-    end
-
-    send(playerId, string.format("Usage: /ph props %s add|remove|list|clear <propKey>", mode))
-    return 1
 end
 
 function PropHunt_onChatMessage(playerId, playerName, message)
@@ -1340,18 +1183,7 @@ function PropHunt_onChatMessage(playerId, playerName, message)
         local players = MP.GetPlayers()
         send(playerId, "Connected Players:")
         for pid, pname in pairs(players) do
-            local pdata = gameState.players[pid]
-            local econ = gameState.economy[pid]
-            local teamLabel = pdata and tostring(pdata.team or "unknown") or "waiting"
-            local aliveLabel = pdata and ((pdata.alive == true) and "alive" or "out") or "n/a"
-            local points = econ and tonumber(econ.points or 0) or 0
-            local perks = {}
-            if econ and econ.perks then
-                if econ.perks.quickScan then perks[#perks + 1] = "quickScan" end
-                if econ.perks.stealthTaunt then perks[#perks + 1] = "stealthTaunt" end
-            end
-            local perkLabel = (#perks > 0) and table.concat(perks, "|") or "-"
-            send(playerId, string.format("  ID %s: %s | team=%s | alive=%s | points=%d | perks=%s", tostring(pid), tostring(pname), teamLabel, aliveLabel, points, perkLabel))
+            send(playerId, "  ID " .. tostring(pid) .. ": " .. tostring(pname))
         end
         return 1
     elseif msg == "/phstatus" then
@@ -1552,8 +1384,8 @@ function PropHunt_onChatMessage(playerId, playerName, message)
                 send(playerId, "Usage: /phset seekertablock <on|off>")
                 return 1
             end
-            config.seekerTabPrevention = (v == "on")
-            broadcast("seekerTabPrevention=" .. tostring(config.seekerTabPrevention))
+            config.seekerTabPrevention = false
+            broadcast("seekerTabPrevention=false (TAB blocking has been removed)")
             broadcastSettings()
             return 1
         elseif key == "nametags" then
@@ -1683,15 +1515,10 @@ function PropHunt_onChatMessage(playerId, playerName, message)
         end
     elseif msg:match("^/phprops%s") then
         local words = parseWords(msg)
-        local arg = normalizePropKey(words[2] or "")
+        local arg = (words[2] or "")
         if arg == "" then
             send(playerId, "Usage: /phprops random OR /phprops <propKey>")
-            send(playerId, "Usage: /phprops blacklist|whitelist add|remove|list|clear <propKey>")
             return 1
-        end
-
-        if arg == "blacklist" or arg == "whitelist" then
-            return handlePropFilterCommand(playerId, arg, normalizePropKey(words[3]), words[4])
         end
 
         if arg == "random" then
@@ -1704,9 +1531,8 @@ function PropHunt_onChatMessage(playerId, playerName, message)
             send(playerId, "Unknown prop key: " .. tostring(arg))
             return 1
         end
-        if not propAllowedForRound(arg) then
-            send(playerId, "Prop is currently filtered out: " .. tostring(arg))
-            send(playerId, "Eligible pool: " .. describePropFilterState())
+        if not propAllowedByTier(arg) then
+            send(playerId, "Prop is blocked by current propTierMode (" .. tostring(config.propTierMode or "all") .. ")")
             return 1
         end
 
@@ -1736,12 +1562,13 @@ function PropHunt_requestState(playerId, data)
 
     -- Send role
     MP.TriggerClientEvent(playerId, "PropHunt_GameStart", tostring(gameState.roundId) .. "," .. tostring(p.team))
+    sendTeamListsToPlayer(playerId)
 
     -- Send prop assignment (hiders)
     if p.team == "hider" then
         -- Ensure a prop exists even if this player joined late / state got reset
         if not p.prop or tostring(p.prop) == "" then
-            p.prop = pickRandomEligibleProp()
+            p.prop = config.propPool[math.random(#config.propPool)]
         end
         MP.TriggerClientEvent(playerId, "PropHunt_AssignProp", tostring(gameState.roundId) .. "," .. tostring(p.prop))
     end
@@ -1854,7 +1681,7 @@ end
 -- Server broadcasts to all: "PropHunt_Taunt" => payload
 --
 -- Rules:
---  - Allowed any time
+--  - Only live hiders may taunt during the main round, after becoming props.
 --  - Server enforces per-player cooldown
 -- ============================
 function PropHunt_onTauntRequest(playerId, data)
@@ -1872,16 +1699,20 @@ function PropHunt_onTauntRequest(playerId, data)
         if config.debug then print("PropHunt TauntRequest rejected: player not in game") end
         return
     end
+    if gameState.phase ~= "round" then return end
+    local pdata = gameState.players[playerId]
+    if not pdata or pdata.team ~= "hider" or pdata.alive ~= true then
+        if config.debug then print("PropHunt TauntRequest rejected: not a live hider") end
+        return
+    end
+
     local tauntCd = getEffectiveTauntCooldown(playerId)
     local cd, remaining = isOnCooldown(gameState.lastTaunt, playerId, tauntCd)
     if cd then
         return
     end
 
-    if team(playerId) == "hider" then
-        grantPoints(playerId, 1)
-    end
-
+    grantPoints(playerId, 1)
     MP.TriggerClientEvent(-1, "PropHunt_Taunt", payload)
 end
 
@@ -2011,10 +1842,8 @@ function PropHunt_onTagRequest(playerId, data)
         -- Tell that player their team changed
         MP.TriggerClientEvent(targetId, "PropHunt_TeamUpdate", tostring(gameState.roundId) .. ",seeker")
         MP.TriggerClientEvent(targetId, "PropHunt_KillcamPulse", tostring(gameState.roundId) .. "," .. tostring(seekerName) .. "," .. tostring(hiderName))
-
         -- Update team lists
-        sendHiderListToSeekers()
-        sendSeekerListToHiders()
+        sendTeamListsToAll()
 
         if gameState.hidersAlive <= 0 then
             PropHunt_StopGameInternal("seekers")
@@ -2029,14 +1858,12 @@ function PropHunt_onTagRequest(playerId, data)
         broadcast(seekerName .. " tagged " .. hiderName .. "!")
 
         -- notify clients for UI
+        MP.TriggerClientEvent(-1, "PropHunt_PlayerTagged", tostring(targetId))
         MP.TriggerClientEvent(-1, "PropHunt_PlayerEliminated", tostring(targetId) .. "," .. tostring(hiderName))
         MP.TriggerClientEvent(targetId, "PropHunt_KillcamPulse", tostring(gameState.roundId) .. "," .. tostring(seekerName) .. "," .. tostring(hiderName))
 
-        clearTempPropsForPlayer(targetId, "tagged")
-
         -- Update team lists
-        sendHiderListToSeekers()
-        sendSeekerListToHiders()
+        sendTeamListsToAll()
 
         if gameState.hidersAlive <= 0 then
             PropHunt_StopGameInternal("seekers")
@@ -2108,34 +1935,6 @@ function PropHunt_onScanRequest(playerId, data)
 end
 MP.RegisterEvent("PropHunt_ScanRequest", "PropHunt_onScanRequest")
 
-function PropHunt_onDecoyRequest(playerId, data)
-    if isEventFlood(gameState.lastDecoyEvent, playerId, config.minEventGapTempProp) then return end
-    if not gameState.active or gameState.phase ~= "round" then return end
-    if not isInGame(playerId) or not isAlive(playerId) then return end
-    if team(playerId) ~= "hider" then
-        MP.TriggerClientEvent(playerId, "PropHunt_DecoyDenied", "Hiders only")
-        return
-    end
-
-    local pdata = gameState.players[playerId]
-    local assignedProp = pdata and pdata.prop or nil
-    if not assignedProp or tostring(assignedProp) == "" then
-        MP.TriggerClientEvent(playerId, "PropHunt_DecoyDenied", "No prop assigned")
-        return
-    end
-
-    local limit = math.max(0, tonumber(config.decoysPerRound or 1) or 1)
-    local used = tonumber(gameState.decoysUsed[playerId] or 0) or 0
-    if used >= limit then
-        MP.TriggerClientEvent(playerId, "PropHunt_DecoyDenied", "Decoy already used this round")
-        return
-    end
-
-    gameState.decoysUsed[playerId] = used + 1
-    MP.TriggerClientEvent(playerId, "PropHunt_DecoyPlace", tostring(gameState.roundId) .. "," .. tostring(assignedProp))
-end
-MP.RegisterEvent("PropHunt_DecoyRequest", "PropHunt_onDecoyRequest")
-
 -- ============================
 -- JOIN / DISCONNECT HANDLERS
 -- ============================
@@ -2171,33 +1970,47 @@ function PropHunt_onPlayerJoin(playerId)
     end
 
     if teamAssigned == "hider" then
-        local propName = config.nextRoundForcedProp
-        if not propName or not propAllowedForRound(propName) then
-            propName = pickRandomEligibleProp()
-        end
+        local propName = config.nextRoundForcedProp or config.propPool[math.random(#config.propPool)]
         gameState.players[playerId].prop = propName
         MP.TriggerClientEvent(playerId, "PropHunt_AssignProp", tostring(gameState.roundId) .. "," .. tostring(propName))
     end
 
     pushSettingsToClient(playerId)
-    sendHiderListToSeekers()
-    sendSeekerListToHiders()
+    sendTeamListsToAll()
     broadcast(name .. " joined mid-round as " .. string.upper(teamAssigned))
 end
 
 function PropHunt_onPlayerDisconnect(playerId)
     if not gameState.active then return end
 
+    local leaving = gameState.players[playerId]
+    local leavingTeam = leaving and leaving.team or nil
+
     clearTempPropsForPlayer(playerId, "disconnect")
     -- owner-fallback cleanup disabled (could remove live vehicles)
 
-    if gameState.players[playerId] then
+    if leaving then
         gameState.players[playerId] = nil
         gameState.hidersAlive = countAliveHiders()
+        gameState.seekerCount = countAliveSeekers()
+        gameState.hiderCount = countTeamMembers("hider")
+
+        if leavingTeam == "seeker" and gameState.seekerCount <= 0 and gameState.hidersAlive > 0 then
+            local replacementId = pickRandomAliveHider()
+            if replacementId and gameState.players[replacementId] then
+                local replacementName = gameState.players[replacementId].name or (MP.GetPlayerName(replacementId) or tostring(replacementId))
+                gameState.players[replacementId].team = "seeker"
+                gameState.players[replacementId].alive = true
+                gameState.hidersAlive = countAliveHiders()
+                gameState.seekerCount = countAliveSeekers()
+                gameState.hiderCount = countTeamMembers("hider")
+                MP.TriggerClientEvent(replacementId, "PropHunt_TeamUpdate", tostring(gameState.roundId) .. ",seeker")
+                broadcast("Seeker left. Replacement seeker: " .. tostring(replacementName))
+            end
+        end
 
         -- Update team lists
-        sendHiderListToSeekers()
-        sendSeekerListToHiders()
+        sendTeamListsToAll()
 
         -- If no hiders remain, seekers win.
         if gameState.phase == "round" and gameState.hidersAlive <= 0 then

@@ -22,13 +22,5 @@
     "onDown": "extensions.PropHuntKeybinds.scan()",
     "title": "Prop Hunt - Seeker Scan",
     "desc": "(Seekers) Trigger a scanner ping beep (cooldown on server)."
-  },
-  "phDecoy": {
-    "cat": "vehicle",
-    "order": 7,
-    "ctx": "tlua",
-    "onDown": "extensions.PropHuntKeybinds.decoy()",
-    "title": "Prop Hunt - Place Decoy",
-    "desc": "(Hiders) Place your one fake prop decoy for the round."
   }
 }

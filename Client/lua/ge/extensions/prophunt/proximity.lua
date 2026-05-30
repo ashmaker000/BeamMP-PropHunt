@@ -117,40 +117,6 @@ function M.new(ctx)
     return best
   end
 
-  function self.getNearestHiderInfo()
-    local myVeh = be:getPlayerVehicle(0)
-    if not myVeh then return nil, {} end
-    local myPos = myVeh:getPosition()
-    if not myPos then return nil, {} end
-    local best, bestPid, bestVid, bestPos = nil, nil, nil, nil
-    if not MPVehicleGE or not MPVehicleGE.getVehicles then return nil, {} end
-
-    for _, sv in pairs(MPVehicleGE.getVehicles()) do
-      local vid = sv.gameVehicleID
-      if vid and myVeh:getID() ~= vid then
-        local pid = nil
-        if sv.serverVehicleString then pid = tonumber(string.match(tostring(sv.serverVehicleString), "(%d+)%-%d+")) end
-        if not pid then pid = self.resolveOwnerPlayerIdFromVehId(vid) end
-        if pid and self.pidIsHider(pid) then
-          local v = be:getObjectByID(vid)
-          if v and v.getPosition then
-            local p = v:getPosition()
-            if p then
-              local dx, dy, dz = (p.x-myPos.x), (p.y-myPos.y), (p.z-myPos.z)
-              local d = math.sqrt(dx*dx + dy*dy + dz*dz)
-              if not best or d < best then best, bestPid, bestVid, bestPos = d, pid, vid, p end
-            end
-          end
-        end
-      end
-    end
-
-    if best then
-      return best, { pid = bestPid, vid = bestVid, dist = best, pos = bestPos }
-    end
-    return nil, {}
-  end
-
   function self.getNearestSeekerDistance()
     local myVeh = be:getPlayerVehicle(0)
     if not myVeh then return nil, {} end
