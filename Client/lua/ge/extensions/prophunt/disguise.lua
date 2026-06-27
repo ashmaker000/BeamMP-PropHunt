@@ -412,8 +412,13 @@ function M.spawnAndAttachProp(ctx, propName)
   local ok, err
   if effectiveMode == "preload" then
     applyPreloadMask(true)
-    if ctx.getPropVehId and ctx.getPropVehId() then --remove temp prop
-      be:getObjectByID(ctx.getPropVehId()):delete()
+    if ctx.getPropVehId and ctx.getPropVehId() then
+      local oldProp = be:getObjectByID(ctx.getPropVehId())
+      if oldProp then
+        pcall(function() oldProp:setActive(0) end)
+        pcall(function() oldProp:delete() end)
+      end
+      if ctx.setPropVehId then ctx.setPropVehId(nil) end
     end
     ok, err = pcall(function() doReplace(modelKey) end)
     applyPreloadMask(false)

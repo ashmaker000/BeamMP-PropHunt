@@ -54,46 +54,80 @@ Server-authoritative PropHunt mode with hide phase, seeker/hider teams, prop dis
 ---
 
 ## Commands
-### Core
-- `/ph help`
-- `/ph start [minutes]`
-- `/ph stop`
-- `/ph status`
-- `/ph points [playerID]`
-- `/ph players`
+Canonical server commands use the spaced `/ph ...` format. Legacy compact aliases such as `/phstart`, `/phstop`, and `/phset ...` still work.
 
-> Canonical format is spaced commands (`/ph start`, `/ph stop`, ...). Legacy compact aliases are still accepted for compatibility.
+### Core server commands
+- `/ph help` - Show command help.
+- `/ph start [minutes]` - Start a round. Optional value is minutes.
+- `/ph stop` - Stop the active round.
+- `/ph status` - Show round, config, visual, autorun, and auto-taunt status.
+- `/ph points [playerID]` - Show economy/perk status for yourself or a player.
+- `/ph players` - List connected player IDs.
 
 ### Team control
-- `/ph seeker <playerID>`
-- `/ph seekers <id1> <id2> ...`
-- `/ph seekername <username>`
-- `/ph seekersname <name1,name2,...>`
+- `/ph seeker <playerID>` - Force one seeker for the next round.
+- `/ph seekers <id1> <id2> ...` - Force multiple seekers for the next round.
+- `/ph seekername <username>` - Force one seeker by exact name for the next round.
+- `/ph seekersname <name1>,<name2>,...` - Force multiple seekers by exact names.
 
-### Settings
-- `/ph set seekers fixed <n>`
-- `/ph set seekers ratio <0-1>`
-- `/ph set hidetime <seconds>`
-- `/ph set roundtime <seconds>`
-- `/ph set mode classic|tag`
-- `/ph set joinpolicy lock_next_round|spectator|seeker|hider`
-- `/ph set disguisemode replace|preload|spawnswap`
-- `/ph set forceghostoff <on|off>`
-- `/ph set cleanupsweep <seconds>`
-- `/ph set spawnswapretry <n>`
-- `/ph set seekertablock <on|off>`
-- `/ph set seekerfadedist <meters>`
-- `/ph set seekerfilterintensity <0-1>`
-- `/ph set hiderfadedist <meters>`
-- `/ph set hiderfilterintensity <0-1>`
+### Round settings
+- `/ph set seekers fixed <n>` - Use a fixed seeker count.
+- `/ph set seekers ratio <0-1>` - Use a seeker ratio.
+- `/ph set hidetime <seconds>` - Set hide phase length. Clamped to `0..180`.
+- `/ph set roundtime <seconds>` - Set round length. Clamped to `30..3600`.
+- `/ph set mode classic|tag` - Classic eliminates hiders; tag converts hiders into seekers.
+- `/ph set joinpolicy lock_next_round|spectator|seeker|hider` - Control mid-round joins.
+- `/ph set disguisemode replace|preload` - Set disguise pipeline. `spawnswap` is deprecated and rejected.
 
-### Presets / map profiles
-- `/ph preset casual|ranked|chaos`
-- `/ph mapprofile <mapKey> <casual|ranked|chaos>`
-- `/ph spawnbank add <mapKey> <seeker|hider> <x> <y> <z>`
-- `/ph spawnbank list <mapKey>`
-- `/ph spawnbank clear <mapKey>`
+### Stability and permissions
+- `/ph set forceghostoff <on|off>` - Force ghost mode off when restoring vehicles.
+- `/ph set cleanupsweep <seconds>` - Set cleanup sweep interval. Clamped to `1..600`.
+- `/ph set spawnswapretry <n>` - Set legacy spawnswap retry count. Clamped to `1..10`.
+- `/ph set seekertablock <on|off>` - Accepted for compatibility; TAB blocking is currently removed.
+- `/ph set nametags <on|off>` - `off` hides nametags during active rounds; `on` shows normal nametags.
+- `/ph set nodegrab <on|off>` - Allow or block node grab during active rounds.
+- `/ph set hiderreset <on|off>` - Allow or block hider reset during active rounds.
+
+### Automation
+- `/ph set autorun <on|off>` - Enable or disable idle auto-start.
+- `/ph set autoruninterval <seconds>` - Set auto-start interval. Clamped to `60..86400`.
+- `/ph set autorunminplayers <n>` - Auto-start when connected players are greater than `n`.
+- `/ph set autotaunt <on|off>` - Enable or disable hider auto-taunts.
+- `/ph set autotauntinterval <seconds>` - Set auto-taunt interval. Clamped to `5..300`.
+
+### Visual settings
+- `/ph set seekerfadedist <meters>` - Seeker proximity vignette range. Clamped to `5..2000`.
+- `/ph set seekerfilterintensity <0-1>` - Seeker proximity vignette strength.
+- `/ph set hiderfadedist <meters>` - Hider proximity vignette range. Clamped to `5..2000`.
+- `/ph set hiderfilterintensity <0-1>` - Hider proximity vignette strength.
+
+### Presets and map profiles
+- `/ph preset casual|ranked|chaos` - Apply a gameplay preset.
+- `/ph mapprofile <mapKey> <casual|ranked|chaos>` - Bind a preset to a map key.
+- `/ph spawnbank add <mapKey> <seeker|hider> <x> <y> <z>` - Add a spawn hint.
+- `/ph spawnbank list <mapKey>` - Show spawn hint counts.
+- `/ph spawnbank clear <mapKey>` - Clear spawn hints for a map.
 
 ### Props
-- `/ph props random`
-- `/ph props <propKey>`
+- `/ph props random` - Use random hider props next round.
+- `/ph props <propKey>` - Force one prop for the next round only.
+
+### Compatibility aliases
+- `/startgame` - Alias for `/ph start`.
+- `/stopgame` - Alias for `/ph stop`.
+- `/players` - Alias for `/ph players`.
+- `/setseeker <playerID>` - Alias for `/ph seeker <playerID>`.
+- Compact command forms also work: `/phstart`, `/phstop`, `/phhelp`, `/phstatus`, `/phpoints`, `/phplayers`, `/phseeker`, `/phseekers`, `/phseekername`, `/phseekersname`, `/phset`, `/phprops`, `/phpreset`, `/phmapprofile`, `/phspawnbank`.
+
+### Client commands
+- `/phhelp` - Show client command help.
+- `/ph config <setting> <value>` - Configure local client distances/intensities.
+- `/phconfig <setting> <value>` - Compact client config form.
+- `/phtag <playerId>` - Send a manual tag request. Intended for seekers/debugging.
+
+Client config settings:
+- `taunt_dist` or `tauntdist` - Taunt sound distance in meters.
+- `proximity`, `proximityintensity`, or `proximityfilter` - Seeker proximity vignette intensity.
+- `proximity_dist`, `proximitydist`, or `proximitydistance` - Seeker proximity vignette range.
+- `hiderfadedist`, `hiderfadedistance`, `hiderproximitydist`, or `hiderproximitydistance` - Hider proximity vignette range.
+- `hiderfilterintensity`, `hiderfilter`, or `hiderproximity` - Hider proximity vignette intensity.

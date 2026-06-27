@@ -1405,7 +1405,7 @@ local function onUpdate(dt)
     applyNametagPolicyNow()
 
     -- Auto-taunt disabled by default (it can sound like an auto horn).
-    if autoTauntEnabled and isHidden and propID then
+    if autoTauntEnabled and canLocalTauntAsProp() then
         tauntTimer = tauntTimer - dt
         if tauntTimer <= 0 then
             triggerTaunt()
@@ -1414,7 +1414,9 @@ local function onUpdate(dt)
 
         -- Reset electrics a moment later so sound doesn't loop incorrectly
         if tauntTimer < (tauntIntervalSeconds - 2) and tauntTimer > (tauntIntervalSeconds - 2.2) then
-            local veh = be:getObjectByID(propID)
+            local activeVeh = be:getPlayerVehicle(0)
+            local vehId = activeVeh and activeVeh:getID() or propID
+            local veh = vehId and be:getObjectByID(vehId) or nil
             if veh then
                 veh:queueLuaCommand("electrics.values.phTaunt = ''")
             end
@@ -1773,6 +1775,31 @@ local propVehId = nil
 local preDisguiseModelKey = nil
 local preDisguiseConfig = nil
 
+function PH_discardLocalTempProp(reason)
+    local id = propVehId
+    if not id then return end
+
+    local prop = be:getObjectByID(id)
+    local current = be:getPlayerVehicle(0)
+    local currentId = current and current:getID() or nil
+
+    if prop and tonumber(id) ~= tonumber(currentId) then
+        pcall(function() prop:setActive(0) end)
+        pcall(function()
+            if core_vehicleBridge and core_vehicleBridge.executeAction then
+                core_vehicleBridge.executeAction(prop, 'setFreeze', true)
+            end
+        end)
+        pcall(function()
+            local pos = current and current:getPosition() or vec3()
+            prop:setPosition(pos.x + 5000, pos.y + 5000, pos.z + 20)
+        end)
+        print("[PH] discarded local temp prop id=" .. tostring(id) .. " reason=" .. tostring(reason or "unknown"))
+    end
+
+    propVehId = nil
+end
+
 spawnAndAttachProp = function(propName)
     disguiseMod.spawnAndAttachProp({
         beamMessage = beamMessage,
@@ -1799,6 +1826,7 @@ spawnAndAttachProp = function(propName)
         end,
         disableSpawnswapForRound = function(reason)
             if currentRoundId then
+                PH_discardLocalTempProp(reason)
                 spawnswapDisabledRound = currentRoundId
                 spawnswapDisabledReason = tostring(reason or "unknown")
                 print("[PH] spawnswap disabled for round " .. tostring(currentRoundId) .. " reason=" .. tostring(spawnswapDisabledReason))
@@ -1837,6 +1865,7 @@ preSpawnIfNeeded = function()
         end,
         disableSpawnswapForRound = function(reason)
             if currentRoundId then
+                PH_discardLocalTempProp(reason)
                 spawnswapDisabledRound = currentRoundId
                 spawnswapDisabledReason = tostring(reason or "unknown")
                 print("[PH] pre-spawn disabled for round " .. tostring(currentRoundId) .. " reason=" .. tostring(spawnswapDisabledReason))
@@ -2172,6 +2201,10 @@ end
 onRoundEnd = function(data)
     -- data can contain a reason string from the server
     local reason = tostring(data or "")
+    gameActive = false
+    hidePhase = false
+    hideTimer = 0
+    allowDisguise = false
 
     local skipRestore = (currentRoundId and localEliminatedRestoreRound == currentRoundId)
 

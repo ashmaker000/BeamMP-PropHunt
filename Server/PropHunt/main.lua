@@ -498,6 +498,27 @@ local function broadcastSettings()
     pushSettingsToClient(-1)
 end
 
+local function sendCurrentPhaseToPlayer(playerId)
+    if not gameState.active or not playerId then return end
+
+    local pdata = gameState.players and gameState.players[playerId] or nil
+    if pdata and pdata.team then
+        MP.TriggerClientEvent(playerId, "PropHunt_GameStart", tostring(gameState.roundId) .. "," .. tostring(pdata.team))
+    end
+
+    if gameState.phase == "hide" then
+        MP.TriggerClientEvent(playerId, "PropHunt_HidePhaseStart", tostring(gameState.roundId) .. "," .. tostring(gameState.hideTimer))
+        MP.TriggerClientEvent(playerId, "PropHunt_HideTimerUpdate", tostring(gameState.roundId) .. "," .. tostring(gameState.hideTimer))
+    elseif gameState.phase == "round" then
+        MP.TriggerClientEvent(playerId, "PropHunt_HidePhaseEnd", tostring(gameState.roundId))
+        MP.TriggerClientEvent(playerId, "PropHunt_RoundStart", tostring(gameState.roundId))
+        MP.TriggerClientEvent(playerId, "PropHunt_TimerUpdate", tostring(gameState.roundId) .. "," .. tostring(gameState.roundTimer))
+    end
+
+    pushSettingsToClient(playerId)
+    sendTeamListsToPlayer(playerId)
+end
+
 
 local function tryServerRemoveVehicle(serverVeh)
     local sv = tostring(serverVeh or "")
@@ -2004,7 +2025,9 @@ function PropHunt_onPlayerDisconnect(playerId)
                 gameState.hidersAlive = countAliveHiders()
                 gameState.seekerCount = countAliveSeekers()
                 gameState.hiderCount = countTeamMembers("hider")
+                clearTempPropsForPlayer(replacementId, "seekers")
                 MP.TriggerClientEvent(replacementId, "PropHunt_TeamUpdate", tostring(gameState.roundId) .. ",seeker")
+                sendCurrentPhaseToPlayer(replacementId)
                 broadcast("Seeker left. Replacement seeker: " .. tostring(replacementName))
             end
         end
